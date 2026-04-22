@@ -91,3 +91,28 @@ fn parameter_shadowing_global_is_rejected() {
 fn array_initializer_syntax_is_rejected() {
     compile_expect_err("func main() { int a[3] = 7; return 0; }", "Expected ';'");
 }
+
+#[test]
+fn zero_sized_arrays_are_rejected() {
+    compile_expect_err("int g[0]; func main() { return 0; }", "must be positive");
+    compile_expect_err("func main() { int a[0]; return 0; }", "must be positive");
+}
+
+#[test]
+fn global_slot_limit_is_checked() {
+    let mut source = String::new();
+    for i in 0..=minilang::Vm::MAX_GLOBALS {
+        source.push_str(&format!("int g{};\n", i));
+    }
+    source.push_str("func main() { return 0; }");
+
+    compile_expect_err(&source, "Global storage exceeds 256 slots");
+}
+
+#[test]
+fn global_array_slot_limit_is_checked() {
+    compile_expect_err(
+        "int too_big[257]; func main() { return 0; }",
+        "Global storage exceeds 256 slots",
+    );
+}

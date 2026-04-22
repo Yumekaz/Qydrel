@@ -3,8 +3,9 @@
 //! Performs type checking, scope analysis, and validation.
 
 use crate::ast::*;
+use crate::limits;
 use crate::token::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -64,6 +65,8 @@ pub struct SemanticAnalyzer {
     functions: HashMap<String, Symbol>,
     errors: Vec<SemanticError>,
     current_function: Option<String>,
+    current_local_names: HashSet<String>,
+    current_local_slots: usize,
 }
 
 impl SemanticAnalyzer {
@@ -73,6 +76,8 @@ impl SemanticAnalyzer {
             functions: HashMap::new(),
             errors: Vec::new(),
             current_function: None,
+            current_local_names: HashSet::new(),
+            current_local_slots: 0,
         }
     }
 
@@ -121,14 +126,25 @@ impl SemanticAnalyzer {
     }
 
     fn collect_declarations(&mut self, program: &Program) {
+        let mut global_slots = 0usize;
+
         // Collect globals
         for glob in &program.globals {
+            let checked_array_size =
+                self.validate_array_size(&glob.name, glob.array_size, glob.span);
+            let slot_count = if glob.array_size.is_some() {
+                checked_array_size.unwrap_or(0)
+            } else {
+                1
+            };
+            self.add_global_slots(&glob.name, slot_count, glob.span, &mut global_slots);
+
             let sym = Symbol {
                 name: glob.name.clone(),
                 sym_type: glob.var_type,
                 is_global: true,
                 is_array: glob.array_size.is_some(),
-                array_size: glob.array_size.unwrap_or(0),
+                array_size: checked_array_size.map(|size| size as i32).unwrap_or(0),
                 is_function: false,
                 param_types: vec![],
             };
@@ -184,6 +200,12 @@ impl SemanticAnalyzer {
 
     fn analyze_function(&mut self, func: &Function) {
         self.current_function = Some(func.name.clone());
+        self.current_local_names.clear();
+        self.current_local_names
+            .extend(func.params.iter().map(|param| param.name.clone()));
+        self.current_local_slots = func.params.len();
+        self.check_local_slot_limit(func.span);
+
         self.push_scope();
 
         // Add parameters to scope
@@ -236,12 +258,15 @@ impl SemanticAnalyzer {
                     return;
                 }
 
+                let checked_array_size = self.validate_array_size(name, *array_size, *span);
+                self.add_local_slot(name, *span);
+
                 let sym = Symbol {
                     name: name.clone(),
                     sym_type: *var_type,
                     is_global: false,
                     is_array: array_size.is_some(),
-                    array_size: array_size.unwrap_or(0),
+                    array_size: checked_array_size.map(|size| size as i32).unwrap_or(0),
                     is_function: false,
                     param_types: vec![],
                 };
@@ -364,6 +389,69 @@ impl SemanticAnalyzer {
             Stmt::ExprStmt { expr, .. } => {
                 self.analyze_expr(expr);
             }
+        }
+    }
+
+    fn validate_array_size(
+        &mut self,
+        name: &str,
+        array_size: Option<i32>,
+        span: Span,
+    ) -> Option<usize> {
+        match array_size {
+            Some(size) if size > 0 => Some(size as usize),
+            Some(_) => {
+                self.error(&format!("Array size for '{}' must be positive", name), span);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn add_global_slots(&mut self, name: &str, slots: usize, span: Span, global_slots: &mut usize) {
+        if slots == 0 {
+            return;
+        }
+
+        let Some(next_slots) = global_slots.checked_add(slots) else {
+            self.error("Global storage size overflow", span);
+            return;
+        };
+
+        if next_slots > limits::MAX_GLOBAL_SLOTS {
+            self.error(
+                &format!(
+                    "Global storage exceeds {} slots at '{}' (needs {})",
+                    limits::MAX_GLOBAL_SLOTS,
+                    name,
+                    next_slots
+                ),
+                span,
+            );
+        }
+
+        *global_slots = next_slots;
+    }
+
+    fn add_local_slot(&mut self, name: &str, span: Span) {
+        if self.current_local_names.insert(name.to_string()) {
+            self.current_local_slots = self.current_local_slots.saturating_add(1);
+            self.check_local_slot_limit(span);
+        }
+    }
+
+    fn check_local_slot_limit(&mut self, span: Span) {
+        if self.current_local_slots > limits::MAX_LOCAL_SLOTS {
+            let function_name = self.current_function.as_deref().unwrap_or("<unknown>");
+            self.error(
+                &format!(
+                    "Local storage exceeds {} slots in function '{}' (needs {})",
+                    limits::MAX_LOCAL_SLOTS,
+                    function_name,
+                    self.current_local_slots
+                ),
+                span,
+            );
         }
     }
 

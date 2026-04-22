@@ -23,6 +23,7 @@ pub mod gc;
 pub mod gc_vm;
 pub mod jit;
 pub mod lexer;
+pub mod limits;
 pub mod optimizer;
 pub mod parser;
 pub mod repl;

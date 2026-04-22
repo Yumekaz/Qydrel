@@ -20,6 +20,16 @@ fn run_expect_trap(source: &str, expected_trap: TrapCode) {
     assert_eq!(result.trap_code, expected_trap, "wrong trap code");
 }
 
+fn run_expect_compile_error(source: &str, expected: &str) {
+    let err = run(source).expect_err("expected compilation to fail");
+    assert!(
+        err.contains(expected),
+        "expected error containing {:?}, got:\n{}",
+        expected,
+        err
+    );
+}
+
 fn run_optimized(source: &str) -> minilang::VmResult {
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
@@ -393,5 +403,5 @@ fn test_trap_local_storage_overflow() {
     }
     source.push_str("return 0; }");
 
-    run_expect_trap(&source, TrapCode::StackOverflow);
+    run_expect_compile_error(&source, "Local storage exceeds 1024 slots");
 }

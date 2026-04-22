@@ -15,7 +15,7 @@
 | Call frames | 100 max |
 | Operand stack | 1000 entries |
 | Execution cycles | 100,000 max |
-| Instructions | 10,000 max (constant exists; not currently enforced) |
+| Instructions | 10,000 max |
 
 ### Trap Codes
 | Code | Name | Description |

@@ -7,7 +7,8 @@
 //! - Root tracking prevents premature collection
 
 use crate::alloc::BumpAllocator;
-use crate::compiler::{CompiledProgram, Opcode};
+use crate::compiler::{CompiledProgram, GlobalInfo, Opcode};
+use crate::limits;
 use crate::vm::TrapCode;
 
 /// A value that can be either immediate or a heap reference
@@ -155,24 +156,19 @@ pub struct GcVm<'a> {
 }
 
 impl<'a> GcVm<'a> {
-    pub const MAX_GLOBALS: usize = 256;
-    pub const MAX_FRAMES: usize = 100;
-    pub const MAX_OPERAND_STACK: usize = 1000;
-    pub const MAX_CYCLES: u64 = 100_000;
-    pub const GC_THRESHOLD: usize = 8; // Collect after 8 arrays allocated
+    pub const MAX_GLOBALS: usize = limits::MAX_GLOBAL_SLOTS;
+    pub const MAX_LOCAL_SLOTS: usize = limits::MAX_LOCAL_SLOTS;
+    pub const MAX_FRAMES: usize = limits::MAX_FRAMES;
+    pub const MAX_OPERAND_STACK: usize = limits::MAX_OPERAND_STACK;
+    pub const MAX_CYCLES: u64 = limits::MAX_CYCLES;
+    pub const MAX_INSTRUCTIONS: usize = limits::MAX_INSTRUCTIONS;
+    pub const GC_THRESHOLD: usize = limits::GC_THRESHOLD; // Collect after 8 arrays allocated
 
     pub fn new(program: &'a CompiledProgram) -> Self {
-        let globals_size = program
-            .globals
-            .values()
-            .map(|g| if g.is_array { g.array_size } else { 1 })
-            .sum::<usize>()
-            .max(Self::MAX_GLOBALS);
-
         Self {
             program,
             stack: Vec::with_capacity(Self::MAX_OPERAND_STACK),
-            globals: vec![GcValue::Int(0); globals_size],
+            globals: vec![GcValue::Int(0); Self::MAX_GLOBALS],
             call_stack: Vec::with_capacity(Self::MAX_FRAMES),
             heap_arrays: Vec::new(),
             free_array_slots: Vec::new(),
@@ -310,6 +306,21 @@ impl<'a> GcVm<'a> {
             .ok_or((TrapCode::StackUnderflow, "Stack underflow".to_string()))
     }
 
+    fn push(&mut self, value: GcValue) -> Result<(), (TrapCode, String)> {
+        if self.stack.len() >= Self::MAX_OPERAND_STACK {
+            return Err((
+                TrapCode::StackOverflow,
+                format!(
+                    "Operand stack overflow (max {} entries)",
+                    Self::MAX_OPERAND_STACK
+                ),
+            ));
+        }
+
+        self.stack.push(value);
+        Ok(())
+    }
+
     /// Pop as integer
     fn pop_int(&mut self) -> Result<i64, (TrapCode, String)> {
         let v = self.pop()?;
@@ -346,6 +357,10 @@ impl<'a> GcVm<'a> {
 
     /// Run the program
     pub fn run(&mut self) -> GcVmResult {
+        if let Err((trap_code, msg)) = self.validate_program() {
+            return self.make_trap_result(trap_code, msg);
+        }
+
         // Find main function
         let main_func = match self.program.functions.get(&self.program.main_func_id) {
             Some(f) => f.clone(),
@@ -443,7 +458,7 @@ impl<'a> GcVm<'a> {
     ) -> Result<bool, (TrapCode, String)> {
         match opcode {
             Opcode::LoadConst => {
-                self.stack.push(GcValue::Int(arg1 as i64));
+                self.push(GcValue::Int(arg1 as i64))?;
                 Ok(true)
             }
 
@@ -452,7 +467,7 @@ impl<'a> GcVm<'a> {
                 let frame = self.current_frame()?;
                 match frame.get(slot) {
                     Some(v) => {
-                        self.stack.push(v);
+                        self.push(v)?;
                         Ok(true)
                     }
                     None => Err((
@@ -473,7 +488,7 @@ impl<'a> GcVm<'a> {
             Opcode::LoadGlobal => {
                 let slot = self.global_slot(arg1)?;
                 let value = self.globals[slot];
-                self.stack.push(value);
+                self.push(value)?;
                 Ok(true)
             }
 
@@ -487,24 +502,21 @@ impl<'a> GcVm<'a> {
             Opcode::Add => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack
-                    .push(GcValue::Int(Self::normalize_i32(a.wrapping_add(b))));
+                self.push(GcValue::Int(Self::normalize_i32(a.wrapping_add(b))))?;
                 Ok(true)
             }
 
             Opcode::Sub => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack
-                    .push(GcValue::Int(Self::normalize_i32(a.wrapping_sub(b))));
+                self.push(GcValue::Int(Self::normalize_i32(a.wrapping_sub(b))))?;
                 Ok(true)
             }
 
             Opcode::Mul => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack
-                    .push(GcValue::Int(Self::normalize_i32(a.wrapping_mul(b))));
+                self.push(GcValue::Int(Self::normalize_i32(a.wrapping_mul(b))))?;
                 Ok(true)
             }
 
@@ -514,86 +526,83 @@ impl<'a> GcVm<'a> {
                 if b == 0 {
                     return Err((TrapCode::DivideByZero, "Division by zero".to_string()));
                 }
-                self.stack.push(GcValue::Int(Self::normalize_i32(a / b)));
+                self.push(GcValue::Int(Self::normalize_i32(a / b)))?;
                 Ok(true)
             }
 
             Opcode::Neg => {
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(Self::normalize_i32(-a)));
+                self.push(GcValue::Int(Self::normalize_i32(-a)))?;
                 Ok(true)
             }
 
             Opcode::Eq => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(if a == b { 1 } else { 0 }));
+                self.push(GcValue::Int(if a == b { 1 } else { 0 }))?;
                 Ok(true)
             }
 
             Opcode::Ne => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(if a != b { 1 } else { 0 }));
+                self.push(GcValue::Int(if a != b { 1 } else { 0 }))?;
                 Ok(true)
             }
 
             Opcode::Lt => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(if a < b { 1 } else { 0 }));
+                self.push(GcValue::Int(if a < b { 1 } else { 0 }))?;
                 Ok(true)
             }
 
             Opcode::Gt => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(if a > b { 1 } else { 0 }));
+                self.push(GcValue::Int(if a > b { 1 } else { 0 }))?;
                 Ok(true)
             }
 
             Opcode::Le => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(if a <= b { 1 } else { 0 }));
+                self.push(GcValue::Int(if a <= b { 1 } else { 0 }))?;
                 Ok(true)
             }
 
             Opcode::Ge => {
                 let b = self.pop_int()?;
                 let a = self.pop_int()?;
-                self.stack.push(GcValue::Int(if a >= b { 1 } else { 0 }));
+                self.push(GcValue::Int(if a >= b { 1 } else { 0 }))?;
                 Ok(true)
             }
 
             Opcode::And => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                self.stack
-                    .push(GcValue::Int(if a.is_truthy() && b.is_truthy() {
-                        1
-                    } else {
-                        0
-                    }));
+                self.push(GcValue::Int(if a.is_truthy() && b.is_truthy() {
+                    1
+                } else {
+                    0
+                }))?;
                 Ok(true)
             }
 
             Opcode::Or => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                self.stack
-                    .push(GcValue::Int(if a.is_truthy() || b.is_truthy() {
-                        1
-                    } else {
-                        0
-                    }));
+                self.push(GcValue::Int(if a.is_truthy() || b.is_truthy() {
+                    1
+                } else {
+                    0
+                }))?;
                 Ok(true)
             }
 
             Opcode::Not => {
                 let a = self.pop()?;
-                self.stack
-                    .push(GcValue::Int(if !a.is_truthy() { 1 } else { 0 }));
+                self.push(GcValue::Int(if !a.is_truthy() { 1 } else { 0 }))?;
                 Ok(true)
             }
 
@@ -615,7 +624,7 @@ impl<'a> GcVm<'a> {
                     TrapCode::StackUnderflow,
                     "Stack underflow on DUP".to_string(),
                 ))?;
-                self.stack.push(value);
+                self.push(value)?;
                 Ok(true)
             }
 
@@ -677,12 +686,12 @@ impl<'a> GcVm<'a> {
                     ));
                 }
 
-                if arg_count > func.local_count {
+                if arg_count != func.param_count {
                     return Err((
                         TrapCode::InvalidInstruction,
                         format!(
-                            "Call has {} arguments but function {} has {} local slots",
-                            arg_count, func_id, func.local_count
+                            "Call has {} arguments but function {} expects {}",
+                            arg_count, func_id, func.param_count
                         ),
                     ));
                 }
@@ -716,11 +725,11 @@ impl<'a> GcVm<'a> {
 
                 if frame.return_pc == usize::MAX {
                     // Main returning
-                    self.stack.push(return_value);
+                    self.push(return_value)?;
                     // call_stack is now empty, will exit
                 } else {
                     self.pc = frame.return_pc;
-                    self.stack.push(return_value);
+                    self.push(return_value)?;
                 }
                 Ok(false)
             }
@@ -760,7 +769,7 @@ impl<'a> GcVm<'a> {
                     }
                 };
 
-                self.stack.push(value);
+                self.push(value)?;
                 Ok(true)
             }
 
@@ -829,7 +838,7 @@ impl<'a> GcVm<'a> {
                     }
                 };
 
-                self.stack.push(value);
+                self.push(value)?;
                 Ok(true)
             }
 
@@ -872,7 +881,7 @@ impl<'a> GcVm<'a> {
                 // Allocate a new array on the heap
                 let size = Self::array_size(arg1)?;
                 let array_id = self.alloc_array(size);
-                self.stack.push(GcValue::ArrayRef(array_id));
+                self.push(GcValue::ArrayRef(array_id))?;
                 Ok(true)
             }
 
@@ -880,10 +889,89 @@ impl<'a> GcVm<'a> {
                 // Legacy opcode - same as AllocArray
                 let size = Self::array_size(arg1)?;
                 let array_id = self.alloc_array(size);
-                self.stack.push(GcValue::ArrayRef(array_id));
+                self.push(GcValue::ArrayRef(array_id))?;
                 Ok(true)
             }
         }
+    }
+
+    fn validate_program(&self) -> Result<(), (TrapCode, String)> {
+        if self.program.instructions.len() > Self::MAX_INSTRUCTIONS {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!(
+                    "Instruction count {} exceeds limit {}",
+                    self.program.instructions.len(),
+                    Self::MAX_INSTRUCTIONS
+                ),
+            ));
+        }
+
+        for func in self.program.functions.values() {
+            if func.param_count > func.local_count {
+                return Err((
+                    TrapCode::InvalidInstruction,
+                    format!(
+                        "Function '{}' has {} parameters but only {} local slots",
+                        func.name, func.param_count, func.local_count
+                    ),
+                ));
+            }
+
+            if func.local_count > Self::MAX_LOCAL_SLOTS {
+                return Err((
+                    TrapCode::StackOverflow,
+                    format!(
+                        "Function '{}' needs {} local slots, max {}",
+                        func.name,
+                        func.local_count,
+                        Self::MAX_LOCAL_SLOTS
+                    ),
+                ));
+            }
+        }
+
+        let global_slots = Self::required_global_slots(self.program.globals.values())?;
+        if global_slots > Self::MAX_GLOBALS {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!(
+                    "Global storage exceeds {} slots (needs {})",
+                    Self::MAX_GLOBALS,
+                    global_slots
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn required_global_slots<'g>(
+        globals: impl Iterator<Item = &'g GlobalInfo>,
+    ) -> Result<usize, (TrapCode, String)> {
+        let mut max_slot = 0usize;
+
+        for info in globals {
+            let width = if info.is_array {
+                if info.array_size == 0 {
+                    return Err((
+                        TrapCode::InvalidInstruction,
+                        format!("Global array '{}' has zero size", info.name),
+                    ));
+                }
+                info.array_size
+            } else {
+                1
+            };
+
+            let end = info.slot.checked_add(width).ok_or((
+                TrapCode::InvalidInstruction,
+                "Global storage range overflow".to_string(),
+            ))?;
+            max_slot = max_slot.max(end);
+        }
+
+        Ok(max_slot)
     }
 
     fn current_frame(&self) -> Result<&GcCallFrame, (TrapCode, String)> {
@@ -1031,7 +1119,9 @@ impl<'a> GcVm<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::{CompiledProgram, Compiler, FunctionInfo, Instruction, Opcode};
+    use crate::compiler::{
+        CompiledProgram, Compiler, FunctionInfo, GlobalInfo, Instruction, Opcode,
+    };
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use crate::sema::SemanticAnalyzer;
@@ -1072,6 +1162,22 @@ mod tests {
 
         let mut vm = GcVm::new(&program);
         vm.run()
+    }
+
+    fn make_function(
+        id: usize,
+        name: &str,
+        entry_pc: usize,
+        param_count: usize,
+        local_count: usize,
+    ) -> FunctionInfo {
+        FunctionInfo {
+            name: name.to_string(),
+            id,
+            entry_pc,
+            param_count,
+            local_count,
+        }
     }
 
     #[test]
@@ -1152,6 +1258,75 @@ mod tests {
     }
 
     #[test]
+    fn test_gc_vm_program_global_metadata_over_limit_traps() {
+        let mut functions = HashMap::new();
+        functions.insert(0, make_function(0, "main", 0, 0, 0));
+
+        let mut globals = HashMap::new();
+        globals.insert(
+            "g".to_string(),
+            GlobalInfo {
+                name: "g".to_string(),
+                slot: GcVm::MAX_GLOBALS,
+                is_array: false,
+                array_size: 0,
+            },
+        );
+
+        let program = CompiledProgram {
+            instructions: vec![
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            functions,
+            globals,
+            main_func_id: 0,
+            constants: Vec::new(),
+        };
+
+        let mut vm = GcVm::new(&program);
+        let result = vm.run();
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_gc_vm_instruction_count_limit_traps() {
+        let result = run_bytecode(
+            vec![Instruction::new(Opcode::LoadConst, 0, 0); GcVm::MAX_INSTRUCTIONS + 1],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_gc_vm_operand_stack_overflow_traps() {
+        let result = run_bytecode(
+            vec![Instruction::new(Opcode::LoadConst, 0, 0); GcVm::MAX_OPERAND_STACK + 1],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::StackOverflow);
+    }
+
+    #[test]
+    fn test_gc_vm_function_local_limit_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            GcVm::MAX_LOCAL_SLOTS + 1,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::StackOverflow);
+    }
+
+    #[test]
     fn test_gc_vm_bad_local_slot_traps() {
         let result = run_bytecode(
             vec![
@@ -1178,6 +1353,58 @@ mod tests {
             0,
         );
 
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_gc_vm_too_few_call_args_traps() {
+        let mut functions = HashMap::new();
+        functions.insert(0, make_function(0, "main", 0, 0, 0));
+        functions.insert(1, make_function(1, "f", 2, 1, 2));
+
+        let program = CompiledProgram {
+            instructions: vec![
+                Instruction::new(Opcode::Call, 1, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+                Instruction::new(Opcode::LoadConst, 7, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            functions,
+            globals: HashMap::new(),
+            main_func_id: 0,
+            constants: Vec::new(),
+        };
+
+        let mut vm = GcVm::new(&program);
+        let result = vm.run();
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_gc_vm_extra_call_args_within_local_count_traps() {
+        let mut functions = HashMap::new();
+        functions.insert(0, make_function(0, "main", 0, 0, 0));
+        functions.insert(1, make_function(1, "f", 4, 1, 2));
+
+        let program = CompiledProgram {
+            instructions: vec![
+                Instruction::new(Opcode::LoadConst, 1, 0),
+                Instruction::new(Opcode::LoadConst, 2, 0),
+                Instruction::new(Opcode::Call, 1, 2),
+                Instruction::new(Opcode::Return, 0, 0),
+                Instruction::new(Opcode::LoadConst, 7, 0),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            functions,
+            globals: HashMap::new(),
+            main_func_id: 0,
+            constants: Vec::new(),
+        };
+
+        let mut vm = GcVm::new(&program);
+        let result = vm.run();
         assert!(!result.success);
         assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
     }
