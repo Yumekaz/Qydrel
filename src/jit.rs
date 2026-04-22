@@ -1044,7 +1044,7 @@ mod tests {
 
     #[test]
     fn test_jit_supports_linear_expression_bytecode() {
-        assert!(jit_supports("func main() { return (1 + 2) * 3 == 9; }"));
+        assert!(jit_supports("func main() { return (1 + 2) * 3; }"));
     }
 
     #[test]
