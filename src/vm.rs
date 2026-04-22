@@ -76,6 +76,7 @@ pub struct Vm<'a> {
 /// VM limits matching Python spec
 impl<'a> Vm<'a> {
     pub const MAX_GLOBALS: usize = 256;
+    pub const MAX_LOCAL_SLOTS: usize = 1024;
     pub const MAX_FRAMES: usize = 100;
     pub const MAX_OPERAND_STACK: usize = 1000;
     pub const MAX_CYCLES: u64 = 100_000;
@@ -94,8 +95,8 @@ impl<'a> Vm<'a> {
         Self {
             program,
             stack: Vec::with_capacity(Self::MAX_OPERAND_STACK),
-            locals: vec![i64::MIN; 1024], // Use MIN as "undefined" marker
-            globals: vec![0; globals_size], // Initialized to 0 per spec
+            locals: vec![i64::MIN; Self::MAX_LOCAL_SLOTS], // Use MIN as "undefined" marker
+            globals: vec![0; globals_size],                // Initialized to 0 per spec
             call_stack: Vec::with_capacity(Self::MAX_FRAMES),
             pc: 0,
             cycles: 0,
@@ -146,6 +147,17 @@ impl<'a> Vm<'a> {
                 );
             }
         };
+
+        if main_func.local_count > Self::MAX_LOCAL_SLOTS {
+            return self.make_trap_result(
+                TrapCode::StackOverflow,
+                format!(
+                    "Local storage overflow (need {} slots, max {})",
+                    main_func.local_count,
+                    Self::MAX_LOCAL_SLOTS
+                ),
+            );
+        }
 
         // Set up initial frame
         self.pc = main_func.entry_pc;
@@ -235,8 +247,7 @@ impl<'a> Vm<'a> {
             }
 
             Opcode::LoadLocal => {
-                let frame = self.call_stack.last().unwrap();
-                let slot = frame.base_ptr + arg1 as usize;
+                let slot = self.current_local_slot(arg1)?;
                 let value = self.locals[slot];
                 if value == i64::MIN {
                     return Err((
@@ -250,8 +261,7 @@ impl<'a> Vm<'a> {
 
             Opcode::StoreLocal => {
                 let value = self.pop()?;
-                let frame = self.call_stack.last().unwrap();
-                let slot = frame.base_ptr + arg1 as usize;
+                let slot = self.current_local_slot(arg1)?;
                 self.locals[slot] = value;
                 Ok(true)
             }
@@ -406,6 +416,16 @@ impl<'a> Vm<'a> {
                     ))?
                     .clone();
 
+                if arg_count > func.local_count {
+                    return Err((
+                        TrapCode::InvalidInstruction,
+                        format!(
+                            "Call has {} arguments but function {} has {} local slots",
+                            arg_count, func_id, func.local_count
+                        ),
+                    ));
+                }
+
                 // Check stack overflow (max 100 frames per spec)
                 if self.call_stack.len() >= Self::MAX_FRAMES {
                     return Err((
@@ -422,6 +442,21 @@ impl<'a> Vm<'a> {
                         .get(&self.call_stack.last().map(|f| f.func_id).unwrap_or(0))
                         .map(|f| f.local_count)
                         .unwrap_or(0);
+
+                let required_locals = new_base.checked_add(func.local_count).ok_or((
+                    TrapCode::StackOverflow,
+                    "Local storage overflow".to_string(),
+                ))?;
+                if required_locals > Self::MAX_LOCAL_SLOTS {
+                    return Err((
+                        TrapCode::StackOverflow,
+                        format!(
+                            "Local storage overflow (need {} slots, max {})",
+                            required_locals,
+                            Self::MAX_LOCAL_SLOTS
+                        ),
+                    ));
+                }
 
                 // Copy arguments to new frame's locals
                 for i in (0..arg_count).rev() {
@@ -451,7 +486,7 @@ impl<'a> Vm<'a> {
                 if frame.return_pc == usize::MAX {
                     // Returning from main
                     self.stack.push(return_value);
-                    Ok(true)
+                    Ok(false)
                 } else {
                     self.stack.push(return_value);
                     self.pc = frame.return_pc;
@@ -463,6 +498,7 @@ impl<'a> Vm<'a> {
                 let base_slot = arg1 as usize;
                 let array_size = arg2 as usize;
                 let index = self.pop()? as usize;
+                self.validate_global_array_range(base_slot, array_size)?;
 
                 if index >= array_size {
                     return Err((
@@ -472,7 +508,7 @@ impl<'a> Vm<'a> {
                 }
 
                 // For global arrays
-                let value = self.globals.get(base_slot + index).copied().unwrap_or(0);
+                let value = self.globals[base_slot + index];
                 self.stack.push(value);
                 Ok(true)
             }
@@ -482,6 +518,7 @@ impl<'a> Vm<'a> {
                 let array_size = arg2 as usize;
                 let value = self.pop()?;
                 let index = self.pop()? as usize;
+                self.validate_global_array_range(base_slot, array_size)?;
 
                 if index >= array_size {
                     return Err((
@@ -507,10 +544,10 @@ impl<'a> Vm<'a> {
                     ));
                 }
 
-                let frame = self.call_stack.last().unwrap();
                 // The array reference slot contains the base index into locals
-                let array_base = self.locals[frame.base_ptr + base_slot] as usize;
-                let value = self.locals.get(array_base + index).copied().unwrap_or(0);
+                let ref_slot = self.current_local_slot(base_slot as i32)?;
+                let array_base = self.local_array_base(ref_slot, array_size)?;
+                let value = self.locals[array_base + index];
                 self.stack.push(value);
                 Ok(true)
             }
@@ -528,16 +565,22 @@ impl<'a> Vm<'a> {
                     ));
                 }
 
-                let frame = self.call_stack.last().unwrap();
                 // The array reference slot contains the base index into locals
-                let array_base = self.locals[frame.base_ptr + base_slot] as usize;
+                let ref_slot = self.current_local_slot(base_slot as i32)?;
+                let array_base = self.local_array_base(ref_slot, array_size)?;
                 self.locals[array_base + index] = value;
                 Ok(true)
             }
 
-            Opcode::AllocArray => {
+            Opcode::AllocArray | Opcode::ArrayNew => {
                 // In the standard VM, allocate contiguous slots in the locals array
                 // and push the base address
+                if arg1 < 0 {
+                    return Err((
+                        TrapCode::InvalidInstruction,
+                        format!("Negative array allocation size {}", arg1),
+                    ));
+                }
                 let size = arg1 as usize;
                 // Use a simple bump allocation from the end of locals
                 let base = self.locals.len();
@@ -573,14 +616,8 @@ impl<'a> Vm<'a> {
                 let ret = self.stack.pop().unwrap_or(0);
                 self.call_stack.clear();
                 self.stack.push(ret);
-                Ok(true)
+                Ok(false)
             }
-
-            // ArrayNew is for GcVm only
-            Opcode::ArrayNew => Err((
-                TrapCode::InvalidInstruction,
-                format!("GC-only opcode: {:?}", opcode),
-            )),
 
             _ => Err((
                 TrapCode::InvalidInstruction,
@@ -607,6 +644,119 @@ impl<'a> Vm<'a> {
             .ok_or((TrapCode::StackUnderflow, "Stack underflow".to_string()))
     }
 
+    fn current_local_slot(&self, raw_slot: i32) -> Result<usize, (TrapCode, String)> {
+        if raw_slot < 0 {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!("Negative local slot {}", raw_slot),
+            ));
+        }
+
+        let frame = self.call_stack.last().ok_or((
+            TrapCode::InvalidInstruction,
+            "No active call frame".to_string(),
+        ))?;
+        let relative_slot = raw_slot as usize;
+        let func = self.program.functions.get(&frame.func_id).ok_or((
+            TrapCode::UndefinedFunction,
+            format!("Undefined function {}", frame.func_id),
+        ))?;
+
+        if relative_slot >= func.local_count {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!(
+                    "Local slot {} out of range for function {} ({} locals)",
+                    relative_slot, frame.func_id, func.local_count
+                ),
+            ));
+        }
+
+        let slot = frame
+            .base_ptr
+            .checked_add(relative_slot)
+            .ok_or((TrapCode::StackOverflow, "Local slot overflow".to_string()))?;
+
+        if slot >= Self::MAX_LOCAL_SLOTS {
+            return Err((
+                TrapCode::StackOverflow,
+                format!(
+                    "Local storage overflow (slot {}, max {})",
+                    slot,
+                    Self::MAX_LOCAL_SLOTS
+                ),
+            ));
+        }
+
+        Ok(slot)
+    }
+
+    fn validate_global_array_range(
+        &self,
+        base_slot: usize,
+        array_size: usize,
+    ) -> Result<(), (TrapCode, String)> {
+        let end = base_slot.checked_add(array_size).ok_or((
+            TrapCode::InvalidInstruction,
+            "Global array range overflow".to_string(),
+        ))?;
+
+        if end > self.globals.len() {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!(
+                    "Global array range [{}..{}) exceeds {} global slots",
+                    base_slot,
+                    end,
+                    self.globals.len()
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn local_array_base(
+        &self,
+        ref_slot: usize,
+        array_size: usize,
+    ) -> Result<usize, (TrapCode, String)> {
+        let raw_base = self.locals[ref_slot];
+        if raw_base == i64::MIN {
+            return Err((
+                TrapCode::UndefinedLocal,
+                format!("Undefined local at slot {}", ref_slot),
+            ));
+        }
+
+        if raw_base < 0 {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!("Invalid local array base {}", raw_base),
+            ));
+        }
+
+        let array_base = raw_base as usize;
+        let end = array_base.checked_add(array_size).ok_or((
+            TrapCode::InvalidInstruction,
+            "Local array range overflow".to_string(),
+        ))?;
+
+        if end > self.locals.len() {
+            return Err((
+                TrapCode::InvalidInstruction,
+                format!(
+                    "Local array range [{}..{}) exceeds {} local slots",
+                    array_base,
+                    end,
+                    self.locals.len()
+                ),
+            ));
+        }
+
+        Ok(array_base)
+    }
+
     /// Get allocator stats
     pub fn allocator_stats(&self) -> crate::alloc::AllocatorStats {
         self.allocator.stats()
@@ -621,10 +771,11 @@ impl<'a> Vm<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::{Compiler, Instruction};
+    use crate::compiler::{CompiledProgram, Compiler, FunctionInfo, Instruction, Opcode};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use crate::sema::SemanticAnalyzer;
+    use std::collections::HashMap;
 
     fn compile_and_run(source: &str) -> VmResult {
         let mut lexer = Lexer::new(source);
@@ -635,6 +786,31 @@ mod tests {
         analyzer.analyze(&program).unwrap();
         let (compiled, _) = Compiler::new().compile(&program);
         let mut vm = Vm::new(&compiled);
+        vm.run()
+    }
+
+    fn run_bytecode(instructions: Vec<Instruction>, local_count: usize) -> VmResult {
+        let mut functions = HashMap::new();
+        functions.insert(
+            0,
+            FunctionInfo {
+                name: "main".to_string(),
+                id: 0,
+                entry_pc: 0,
+                param_count: 0,
+                local_count,
+            },
+        );
+
+        let program = CompiledProgram {
+            instructions,
+            functions,
+            globals: HashMap::new(),
+            main_func_id: 0,
+            constants: Vec::new(),
+        };
+
+        let mut vm = Vm::new(&program);
         vm.run()
     }
 
@@ -675,5 +851,69 @@ mod tests {
         let result = compile_and_run("func main() { return 10 / 0; }");
         assert!(!result.success);
         assert_eq!(result.trap_code, TrapCode::DivideByZero);
+    }
+
+    #[test]
+    fn test_bad_global_array_range_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::ArrayLoad, 999, 1),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            0,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_bad_local_array_reference_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::LoadConst, 9999, 0),
+                Instruction::new(Opcode::StoreLocal, 0, 0),
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::LocalArrayLoad, 0, 1),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            1,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::InvalidInstruction);
+    }
+
+    #[test]
+    fn test_undefined_local_array_reference_traps() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::LocalArrayLoad, 0, 1),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            1,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.trap_code, TrapCode::UndefinedLocal);
+    }
+
+    #[test]
+    fn test_array_new_legacy_alias_allocates_array() {
+        let result = run_bytecode(
+            vec![
+                Instruction::new(Opcode::ArrayNew, 2, 0),
+                Instruction::new(Opcode::StoreLocal, 0, 0),
+                Instruction::new(Opcode::LoadConst, 0, 0),
+                Instruction::new(Opcode::LocalArrayLoad, 0, 2),
+                Instruction::new(Opcode::Return, 0, 0),
+            ],
+            1,
+        );
+
+        assert!(result.success);
+        assert_eq!(result.return_value, 0);
     }
 }

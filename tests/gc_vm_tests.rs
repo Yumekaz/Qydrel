@@ -52,6 +52,20 @@ fn gc_vm_matches_standard_vm_for_local_arrays() {
 }
 
 #[test]
+fn standard_and_gc_vm_report_same_success_pc() {
+    let compiled = compile_program("func main() { return 42; }");
+
+    let mut vm = Vm::new(&compiled);
+    let vm_result = vm.run();
+    let mut gc_vm = GcVm::new(&compiled);
+    let gc_result = gc_vm.run();
+
+    assert!(vm_result.success);
+    assert!(gc_result.success);
+    assert_eq!(vm_result.pc, gc_result.pc);
+}
+
+#[test]
 fn gc_vm_reports_array_bounds_traps() {
     let compiled = compile_program("func main() { int arr[2]; return arr[-1]; }");
     let mut gc_vm = GcVm::new(&compiled);

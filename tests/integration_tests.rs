@@ -360,3 +360,14 @@ fn test_trap_stack_overflow() {
         TrapCode::StackOverflow,
     );
 }
+
+#[test]
+fn test_trap_local_storage_overflow() {
+    let mut source = String::from("func main() {");
+    for i in 0..=Vm::MAX_LOCAL_SLOTS {
+        source.push_str(&format!("int x{} = 0;", i));
+    }
+    source.push_str("return 0; }");
+
+    run_expect_trap(&source, TrapCode::StackOverflow);
+}

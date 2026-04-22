@@ -436,7 +436,7 @@ pub enum Opcode {
     // Arrays
     ArrayLoad = 60,     // Push global_array[arg1 + pop()] (arg2 = size for bounds)
     ArrayStore = 61,    // global_array[arg1 + pop_index] = pop_value
-    ArrayNew = 62,      // (GC only) Allocate heap array
+    ArrayNew = 62,      // Legacy alias for AllocArray
     LocalArrayLoad = 63,  // Load from local array reference
     LocalArrayStore = 64, // Store to local array reference
     AllocArray = 65,    // Allocate array of size arg1, push reference
