@@ -1,0 +1,5 @@
+// hello.lang - Simple hello world
+func main() {
+    print 42;
+    return 0;
+}

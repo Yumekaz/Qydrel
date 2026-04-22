@@ -1,0 +1,22 @@
+// arrays.lang - Array operations
+func main() {
+    int arr[10];
+    int i = 0;
+    
+    // Initialize array
+    while (i < 10) {
+        arr[i] = i * i;
+        i = i + 1;
+    }
+    
+    // Sum the array
+    int sum = 0;
+    i = 0;
+    while (i < 10) {
+        sum = sum + arr[i];
+        i = i + 1;
+    }
+    
+    print sum;  // Should print 285 (0+1+4+9+16+25+36+49+64+81)
+    return sum;
+}

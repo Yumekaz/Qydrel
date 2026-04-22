@@ -1,0 +1,30 @@
+// gc_collect.lang - Demonstrates actual garbage collection
+// Creates temporary arrays in a loop that become garbage and get collected
+
+func make_garbage() {
+    // Create a local array - will be garbage after function returns
+    int temp[10];
+    int i = 0;
+    int sum = 0;
+    while (i < 10) {
+        temp[i] = i * i;
+        sum = sum + temp[i];
+        i = i + 1;
+    }
+    return sum;
+}
+
+func main() {
+    int total = 0;
+    int round = 0;
+    
+    // Each call creates a heap array that becomes garbage on return
+    // GC threshold is 8, so after ~8 calls, GC should trigger
+    while (round < 20) {
+        total = total + make_garbage();
+        round = round + 1;
+    }
+    
+    print total;
+    return total;
+}

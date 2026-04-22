@@ -1,0 +1,26 @@
+[package]
+name = "minilang"
+version = "0.1.0"
+edition = "2021"
+authors = ["Systems Engineer"]
+description = "A minimal language compiler with JIT, custom allocator, and GC"
+
+[dependencies]
+thiserror = "1.0"
+libc = "0.2"
+
+[dev-dependencies]
+# criterion = "0.5"  # Requires newer rustc
+
+# [[bench]]
+# name = "benchmarks"
+# harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+debug = true  # For perf profiling with symbols
