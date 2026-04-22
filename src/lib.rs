@@ -2,7 +2,7 @@
 //!
 //! Features:
 //! - Complete compiler pipeline (lexer → parser → semantic analysis → bytecode)
-//! - x86-64 JIT compiler with native code generation
+//! - Experimental x86-64 JIT compiler for a small linear expression subset
 //! - Custom memory allocators (bump, free-list, slab) - ACTUALLY USED
 //! - Mark-sweep garbage collector - ACTUALLY USED
 //! - Stack-based bytecode VM

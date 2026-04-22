@@ -83,7 +83,7 @@ pub struct Token {
 1. Skip whitespace: ' ', '\t', '\n', '\r'
 2. Skip comments: "//" until end of line
 3. Identifiers: [a-zA-Z_][a-zA-Z0-9_]*
-4. Integers: [0-9]+ (parse as i64)
+4. Integers: [0-9]+ (parse as i32)
 5. Two-char operators: ==, !=, <=, >=, &&, ||
 6. Single-char operators: +, -, *, /, <, >, !, =
 7. Delimiters: (, ), {, }, [, ], ,, ;
@@ -136,7 +136,7 @@ pub enum UnaryOp {
 ```rust
 pub enum Expr {
     IntLiteral {
-        value: i64,
+        value: i32,
         span: Span,
     },
     BoolLiteral {
@@ -430,26 +430,26 @@ pub enum Opcode {
     Jump = 40,          // PC = arg1
     JumpIfFalse = 41,   // if pop() == 0 then PC = arg1
     JumpIfTrue = 42,    // if pop() != 0 then PC = arg1
-    Call = 43,          // Call function arg1 with arg2 arguments
-    Return = 44,        // Return pop() to caller
+    Call = 50,          // Call function arg1 with arg2 arguments
+    Return = 51,        // Return pop() to caller
     
     // Arrays
-    ArrayLoad = 50,     // Push global_array[arg1 + pop()] (arg2 = size for bounds)
-    ArrayStore = 51,    // global_array[arg1 + pop_index] = pop_value
-    LocalArrayLoad = 52,  // Load from local array reference
-    LocalArrayStore = 53, // Store to local array reference
-    AllocArray = 54,    // Allocate array of size arg1, push reference
-    ArrayNew = 55,      // (GC only) Allocate heap array
+    ArrayLoad = 60,     // Push global_array[arg1 + pop()] (arg2 = size for bounds)
+    ArrayStore = 61,    // global_array[arg1 + pop_index] = pop_value
+    ArrayNew = 62,      // (GC only) Allocate heap array
+    LocalArrayLoad = 63,  // Load from local array reference
+    LocalArrayStore = 64, // Store to local array reference
+    AllocArray = 65,    // Allocate array of size arg1, push reference
     
     // I/O
-    Print = 60,         // Print pop() as "OUTPUT: {value}"
+    Print = 70,         // Print pop() as "OUTPUT: {value}"
     
     // Stack
-    Pop = 70,           // Discard top of stack
-    Dup = 71,           // Duplicate top of stack
+    Pop = 71,           // Discard top of stack
+    Dup = 72,           // Duplicate top of stack
     
     // Termination
-    Halt = 80,          // Stop execution
+    Halt = 73,          // Stop execution
 }
 ```
 
@@ -1037,6 +1037,13 @@ fn collect_garbage(&mut self) {
 ---
 
 ## Part 8: JIT Specification (x86-64)
+
+The current JIT is intentionally gated before native code emission. It accepts
+only Linux x86-64 programs whose `main` bytecode is a linear, pure,
+single-function expression sequence using `LoadConst`, `Add`, `Sub`, `Mul`,
+`Neg`, comparisons, `Not`, `Pop`, `Dup`, and `Return`. Locals, globals, arrays,
+calls, jumps/control flow, division, `print`, and multiple functions fall back
+to the VM.
 
 ### 8.1 Register Usage
 

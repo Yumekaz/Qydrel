@@ -346,6 +346,13 @@ impl MachineCode {
         self.modrm(0b11, dst, src);
     }
 
+    /// movsxd dst, src (sign-extend 32-bit value to 64-bit)
+    pub fn movsxd_32(&mut self, dst: Reg, src: Reg) {
+        self.rex_w(dst, src);
+        self.emit_u8(0x63);
+        self.modrm(0b11, dst, src);
+    }
+
     /// jmp rel32
     pub fn jmp(&mut self, offset: i32) {
         self.emit_u8(0xE9);
@@ -575,12 +582,7 @@ impl JitCompiler {
             .map(|f| f.entry_pc)
             .unwrap_or(0);
 
-        // Check if we have multiple functions (calls)
-        let has_calls = program.functions.len() > 1;
-
-        if has_calls {
-            // For programs with function calls, fall back to interpreter
-            // (Full function call support would require a more complex implementation)
+        if !Self::supports_program(program, main_entry_pc) {
             return None;
         }
 
@@ -608,6 +610,51 @@ impl JitCompiler {
 
         // Allocate executable memory
         ExecutableMemory::new(self.code.code())
+    }
+
+    fn supports_program(program: &CompiledProgram, main_entry_pc: usize) -> bool {
+        if program.functions.len() != 1 {
+            return false;
+        }
+
+        if main_entry_pc >= program.instructions.len() {
+            return false;
+        }
+
+        let mut saw_return = false;
+        for instr in program.instructions.iter().skip(main_entry_pc) {
+            if !Self::supports_opcode(instr.opcode) {
+                return false;
+            }
+
+            if matches!(instr.opcode, Opcode::Return) {
+                saw_return = true;
+                break;
+            }
+        }
+
+        saw_return
+    }
+
+    fn supports_opcode(opcode: Opcode) -> bool {
+        matches!(
+            opcode,
+            Opcode::LoadConst
+                | Opcode::Add
+                | Opcode::Sub
+                | Opcode::Mul
+                | Opcode::Neg
+                | Opcode::Eq
+                | Opcode::Ne
+                | Opcode::Lt
+                | Opcode::Gt
+                | Opcode::Le
+                | Opcode::Ge
+                | Opcode::Not
+                | Opcode::Pop
+                | Opcode::Dup
+                | Opcode::Return
+        )
     }
 
     fn emit_prologue(&mut self) {
@@ -654,6 +701,7 @@ impl JitCompiler {
                 self.code.pop(Reg::Rcx); // Right operand
                 self.code.pop(Reg::Rax); // Left operand
                 self.code.add(Reg::Rax, Reg::Rcx);
+                self.code.movsxd_32(Reg::Rax, Reg::Rax);
                 self.code.push(Reg::Rax);
             }
 
@@ -661,6 +709,7 @@ impl JitCompiler {
                 self.code.pop(Reg::Rcx);
                 self.code.pop(Reg::Rax);
                 self.code.sub(Reg::Rax, Reg::Rcx);
+                self.code.movsxd_32(Reg::Rax, Reg::Rax);
                 self.code.push(Reg::Rax);
             }
 
@@ -668,6 +717,7 @@ impl JitCompiler {
                 self.code.pop(Reg::Rcx);
                 self.code.pop(Reg::Rax);
                 self.code.imul(Reg::Rax, Reg::Rcx);
+                self.code.movsxd_32(Reg::Rax, Reg::Rax);
                 self.code.push(Reg::Rax);
             }
 
@@ -886,7 +936,7 @@ impl JitCompiler {
             Opcode::AllocArray => {
                 // Allocate array on stack - push the base address
                 // For simplicity, just use a large negative offset from RBP
-                // This is a hack but works for simple programs
+                // Unsupported by the current JIT program gate.
                 let size = instr.arg1;
                 // Use R13 as array allocation pointer (starts at RBP - 4096)
                 // Just push the current position as the array base
@@ -955,6 +1005,31 @@ impl Default for JitCompiler {
 mod tests {
     use super::*;
 
+    fn compile_source(source: &str) -> CompiledProgram {
+        crate::compile(source).expect("test source should compile")
+    }
+
+    fn jit_supports(source: &str) -> bool {
+        let compiled = compile_source(source);
+        let main_entry_pc = compiled
+            .functions
+            .get(&compiled.main_func_id)
+            .expect("compiled program should have main")
+            .entry_pc;
+
+        JitCompiler::supports_program(&compiled, main_entry_pc)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_jit_source(source: &str) -> i64 {
+        let compiled = compile_source(source);
+        let exec_mem = JitCompiler::new()
+            .compile(&compiled)
+            .expect("test source should be accepted by the JIT");
+        let func: extern "C" fn() -> i64 = exec_mem.as_fn();
+        func()
+    }
+
     #[test]
     fn test_machine_code_generation() {
         let mut code = MachineCode::new();
@@ -965,6 +1040,69 @@ mod tests {
         code.ret();
 
         assert!(!code.code().is_empty());
+    }
+
+    #[test]
+    fn test_jit_supports_linear_expression_bytecode() {
+        assert!(jit_supports("func main() { return (1 + 2) * 3 == 9; }"));
+    }
+
+    #[test]
+    fn test_jit_rejects_function_calls() {
+        assert!(!jit_supports(
+            "func id(int x) { return x; } func main() { return id(1); }"
+        ));
+    }
+
+    #[test]
+    fn test_jit_rejects_control_flow() {
+        assert!(!jit_supports(
+            "func main() { if (1) { return 1; } return 0; }"
+        ));
+    }
+
+    #[test]
+    fn test_jit_rejects_loops() {
+        assert!(!jit_supports(
+            "func main() { while (0) { return 1; } return 0; }"
+        ));
+    }
+
+    #[test]
+    fn test_jit_rejects_division_until_traps_are_lowered() {
+        assert!(!jit_supports("func main() { return 10 / 2; }"));
+    }
+
+    #[test]
+    fn test_jit_rejects_locals() {
+        assert!(!jit_supports("func main() { int x = 1; return x; }"));
+    }
+
+    #[test]
+    fn test_jit_rejects_arrays() {
+        assert!(!jit_supports(
+            "func main() { int a[2]; a[0] = 1; return a[0]; }"
+        ));
+    }
+
+    #[test]
+    fn test_jit_rejects_print() {
+        assert!(!jit_supports("func main() { print 1; return 0; }"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_jit_matches_vm_i32_add_wrap() {
+        assert_eq!(
+            run_jit_source("func main() { return 2147483647 + 1; }"),
+            -2147483648
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_jit_matches_vm_i32_mul_wrap() {
+        assert_eq!(run_jit_source("func main() { return 1073741824 * 4; }"), 0);
     }
 
     #[test]

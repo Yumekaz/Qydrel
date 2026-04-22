@@ -23,7 +23,7 @@ fn print_usage() {
     eprintln!("  --ir         Print bytecode IR");
     eprintln!("  --opt        Enable optimizations");
     eprintln!("  --gc         Use GC-integrated VM (heap arrays)");
-    eprintln!("  --jit        Use JIT compiler (simple programs only, Linux x86-64)");
+    eprintln!("  --jit        Use JIT compiler (linear expressions only, Linux x86-64)");
     eprintln!("  --debug      Enable debug output");
     eprintln!("  --bench      Run with timing information");
     eprintln!("  --stats      Show allocator/GC/optimizer statistics");
@@ -244,7 +244,9 @@ fn main() {
                 }
                 None => {
                     // JIT doesn't support this program, fall back to interpreter
-                    eprintln!("Note: JIT doesn't support this program (function calls), using interpreter");
+                    eprintln!(
+                        "Note: JIT doesn't support this program's bytecode subset, using interpreter"
+                    );
                 }
             }
         }

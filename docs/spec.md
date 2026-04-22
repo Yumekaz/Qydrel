@@ -128,4 +128,10 @@ The GC VM must match the reference VM for programs that do not depend on backend
 allocation details.
 
 The hand-written x86-64 JIT is experimental. It currently targets Linux x86-64
-and simple single-function programs; unsupported programs fall back to the VM.
+and only accepts linear, pure, single-function expression bytecode. Supported
+opcodes are constants, integer addition/subtraction/multiplication/negation,
+comparisons, logical not, stack pop/dup, and return.
+
+Bytecode with locals, globals, arrays, function calls, jumps/control flow,
+division, `print`, or multiple functions is rejected by the JIT and falls back
+to the VM.

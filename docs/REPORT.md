@@ -122,6 +122,8 @@ Expressions evaluated: 2
 - REX prefixes for 64-bit operations
 - ModR/M byte encoding
 - System V AMD64 ABI compliance
+- Current program support is intentionally narrow: linear, pure, single-function expression bytecode only
+- Locals, globals, arrays, calls, jumps/control flow, division, and `print` fall back to the VM
 
 **Memory management:**
 - `mmap` for executable memory allocation
@@ -181,7 +183,7 @@ instruments -t "Time Profiler" ./target/release/minilang examples/bench.lang
 "The project includes custom bump/free-list/slab allocators. The compiler currently uses the bump allocator for string interning, while arena-backed AST types are implemented separately but not wired into the parser. The `--gc` VM heap-allocates arrays and traces references from the stack, globals, and call frames."
 
 ### JIT Compilation  
-"The JIT compiler emits real x86-64 machine code - I handle REX prefixes for 64-bit operations, ModR/M byte encoding for register operands, and proper memory protection via mmap/mprotect. It follows the System V AMD64 calling convention."
+"The JIT compiler emits real x86-64 machine code - I handle REX prefixes for 64-bit operations, ModR/M byte encoding for register operands, and proper memory protection via mmap/mprotect. It follows the System V AMD64 calling convention, but its supported source subset is deliberately small today: linear pure expressions in a single `main` function."
 
 ### Optimization
 "I implemented classic compiler optimizations - constant folding evaluates expressions like `10 + 20` at compile time, strength reduction replaces expensive operations like `x * 1` with identity, and dead code elimination uses control flow analysis to remove unreachable instructions."
@@ -192,8 +194,8 @@ instruments -t "Time Profiler" ./target/release/minilang examples/bench.lang
 ## Limitations
 
 - JIT only works on Linux x86-64
-- JIT only handles simple single-function programs; function calls fall back to the interpreter
-- JIT array operations do not currently preserve the VM's bounds-check safety
+- JIT only handles linear, pure, single-function expression bytecode
+- JIT rejects locals, globals, arrays, calls, jumps/control flow, division, and `print` instead of partially compiling unsafe behavior
 - Arena-backed AST exists but is not the active parser representation
 - `runtime.rs` GC value abstractions are not the default VM value model
 - No register allocation in JIT (stack-based)

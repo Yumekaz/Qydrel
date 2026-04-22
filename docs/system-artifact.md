@@ -343,11 +343,11 @@ BOUNDARIES:
 └───────┬─────────┘
         │
         ▼
-┌─────────────────┐    has function calls?
+┌─────────────────┐    unsupported opcode?
 │ Check program   │───────────────────────▶ return None
-│ complexity      │                         (fallback to interp)
+│ subset          │                         (fallback to interp)
 └───────┬─────────┘
-        │ simple enough
+        │ linear pure expression bytecode
         ▼
 ┌─────────────────┐
 │ emit_prologue() │  push rbp; mov rbp,rsp; sub rsp,8192
@@ -692,7 +692,7 @@ pub fn run_jit(source: &str) -> Result<i64, String>;  // Linux x86-64 only
 | VM | Compiler | Instructions are valid opcodes with valid args |
 | VM | VM | Stack never underflows (compiler invariant) |
 | GcVm | GcVm | All ArrayRefs point to valid heap slots |
-| JIT | Compiler | Only main function code is compiled (no calls) |
+| JIT | Compiler | Only linear, pure, single-function expression bytecode is compiled |
 | Optimizer | Compiler | Can modify instructions in-place |
 
 ### 10.3 CLI Interface
@@ -706,7 +706,7 @@ OPTIONS:
   --ir         Print bytecode IR
   --opt        Enable optimizations
   --gc         Use GC-integrated VM
-  --jit        Use JIT compiler (simple programs only)
+  --jit        Use JIT compiler (linear expressions only)
   --debug      Enable debug output
   --bench      Show timing information
   --stats      Show allocator/GC/optimizer statistics
@@ -741,12 +741,12 @@ OPTIONS:
 | Issue | Severity | Mitigation |
 |-------|----------|------------|
 | Arena allocator barely used (44 bytes) | Low | Works, just not impressive |
-| JIT doesn't support function calls | Medium | Falls back to interpreter |
+| JIT intentionally supports a narrow bytecode subset | Medium | Unsupported bytecode falls back to interpreter |
 | GC threshold hardcoded to 8 | Low | Works, but not tuned |
 | No GC for interpreter (only GcVm) | Low | Use --gc flag |
 | Optimizer single-pass only | Low | Multiple constant folds don't chain |
 | mmap executable memory not freed on panic | Low | OS reclaims on exit |
-| No bounds check in JIT array access | HIGH | Could corrupt memory |
+| Array bytecode is rejected by the JIT | Medium | Falls back to interpreter until safe lowering exists |
 
 ---
 
@@ -785,7 +785,7 @@ OPTIONS:
 |----------|------------------------------------------|
 | Alternatives | Compile what we can, interpret the rest |
 | Rationale | Simpler, avoids complex interop |
-| Consequence | JIT only works for simple programs |
+| Consequence | JIT only works for linear pure expressions today |
 | Would reconsider if | Wanted JIT to always provide some benefit |
 
 ### 12.5 Cycle Limit vs Unbounded Execution

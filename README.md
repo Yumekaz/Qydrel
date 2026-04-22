@@ -3,7 +3,7 @@
 A minimal language compiler demonstrating core systems programming concepts:
 - **Bytecode VM** interpreter for the full language
 - **Optional GC VM** with heap-allocated arrays
-- **x86-64 JIT compiler** for simple single-function programs
+- **Experimental x86-64 JIT compiler** for linear, pure, single-function expression bytecode
 - **Custom memory allocators** (bump, free-list, slab), used selectively and benchmarked
 
 ## Building
@@ -23,7 +23,7 @@ Rust may fail during linking.
 # Run with interpreter
 ./target/release/minilang examples/fibonacci.lang
 
-# Run with JIT compiler (Linux x86-64 only)
+# Run with JIT compiler (Linux x86-64 only, limited bytecode subset)
 ./target/release/minilang examples/fibonacci.lang --jit
 
 # Show bytecode IR
@@ -91,7 +91,8 @@ x86-64 native code generation:
 - Direct machine code emission (no LLVM)
 - System V AMD64 ABI compliance
 - Executable memory via mmap/mprotect
-- Current scope: simple single-function programs; calls/recursion fall back to the VM
+- Current scope: linear, pure, single-function expression bytecode
+- Unsupported bytecode, including locals, globals, arrays, calls, jumps, division, and `print`, falls back to the VM
 
 ### Bytecode VM (`src/vm.rs`)
 
