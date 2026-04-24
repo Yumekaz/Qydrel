@@ -52,6 +52,19 @@ jobs:
       - name: Smoke Test
         run: cargo run --locked --release -- examples/hello.lang
 
+      - name: Fuzz Audit
+        id: fuzz_audit
+        run: cargo run --locked --release -- --fuzz 200 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts
+
+      - name: Upload Fuzz Artifacts
+        if: failure() && steps.fuzz_audit.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ github.run_id }}
+          path: fuzz-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+
   windows:
     runs-on: windows-latest
     steps:
