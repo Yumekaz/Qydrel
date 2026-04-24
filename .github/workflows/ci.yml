@@ -54,7 +54,20 @@ jobs:
 
       - name: Fuzz Audit
         id: fuzz_audit
-        run: cargo run --locked --release -- --fuzz 200 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts
+        run: |
+          status=0
+          cargo run --locked --release -- --fuzz 150 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts/seed-5eed --fuzz-json fuzz-summary-5eed.json || status=1
+          cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xc0ffee --fuzz-artifacts fuzz-artifacts/seed-c0ffee --fuzz-json fuzz-summary-c0ffee.json || status=1
+          exit "$status"
+
+      - name: Upload Fuzz Summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-summaries-${{ github.run_id }}
+          path: fuzz-summary-*.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload Fuzz Artifacts
         if: failure() && steps.fuzz_audit.outcome == 'failure'

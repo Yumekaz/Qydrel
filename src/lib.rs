@@ -47,7 +47,7 @@ pub use compare::{
     compare_backends, BackendComparisonReport, BackendOutcome, BackendRun, BackendRunStatus,
 };
 pub use compiler::{CompiledProgram, Compiler, Opcode};
-pub use fuzz::{run_fuzzer, FuzzConfig, FuzzFailure, FuzzFailureReason, FuzzReport};
+pub use fuzz::{run_fuzzer, FuzzConfig, FuzzCoverage, FuzzFailure, FuzzFailureReason, FuzzReport};
 pub use gc::{GarbageCollector, GcStats, TypeTag};
 pub use gc_vm::{GcValue, GcVm, GcVmResult, HeapArray};
 pub use jit::{ExecutableMemory, JitCompiler, MachineCode, Reg};
@@ -59,8 +59,9 @@ pub use runtime::{GcArray, GlobalStore, LocalFrame, Value, ValueStack};
 pub use sema::SemanticAnalyzer;
 pub use token::{Span, Token, TokenKind};
 pub use trace::{
-    events_to_json, first_semantic_trace_divergence, first_trace_divergence, TraceDivergence,
-    TraceEvent, TraceOutcome,
+    events_to_json, first_semantic_trace_divergence, first_trace_divergence, summarize_trace,
+    trace_fingerprint, trace_summary_to_json, TraceDivergence, TraceEvent, TraceOutcome,
+    TraceSummary,
 };
 pub use verifier::{
     BackendEligibility, BackendStatus, FunctionVerification, VerificationError, VerificationReport,

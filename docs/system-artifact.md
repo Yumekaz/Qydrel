@@ -7,7 +7,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              CLI (main.rs)                                  │
-│   --tokens  --ast  --ir  --opt  --jit  --gc  --bench  --eval  --repl       │
+│  --verify  --compare-backends  --trace-*  --fuzz  --jit  --gc  --repl      │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
@@ -81,6 +81,13 @@ flowchart TB
         bytecode[CompiledProgram<br/>Bytecode + Metadata]
     end
 
+    subgraph Audit["Correctness Audit"]
+        verifier[Verifier<br/>verifier.rs]
+        compare[Backend Comparator<br/>compare.rs]
+        trace[Trace Replay/Diff<br/>trace.rs + audit.rs]
+        fuzz[Self-Audit Fuzzer<br/>fuzz.rs]
+    end
+
     subgraph Backend["Backend Executors"]
         vm[VM<br/>vm.rs]
         gcvm[GcVm<br/>gc_vm.rs]
@@ -106,9 +113,19 @@ flowchart TB
     sema --> compiler
     compiler --> optimizer
     optimizer --> bytecode
+    bytecode --> verifier
+    verifier --> compare
+    bytecode --> trace
+    fuzz --> compiler
+    fuzz --> verifier
+    fuzz --> compare
+    fuzz --> trace
     bytecode --> vm
     bytecode --> gcvm
     bytecode --> jit
+    compare --> vm
+    compare --> gcvm
+    compare --> jit
     gcvm --> gc
     vm --> traps
     gcvm --> traps
@@ -198,6 +215,12 @@ BOUNDARIES:
 | `sema.rs` | Validates AST semantics (types, scopes, declarations). |
 | `compiler.rs` | Lowers AST to stack-based bytecode with metadata. |
 | `optimizer.rs` | Transforms bytecode to reduce instruction count. |
+| `limits.rs` | Defines shared runtime and verifier ceilings. |
+| `verifier.rs` | Checks bytecode structure, possible traps, and backend eligibility. |
+| `compare.rs` | Compares observable behavior across executable backends. |
+| `trace.rs` | Defines replay-oriented instruction events and divergence helpers. |
+| `audit.rs` | Runs trace replay and VM-vs-GC trace diff reports. |
+| `fuzz.rs` | Generates deterministic valid programs and runs the full audit pipeline. |
 | `vm.rs` | Interprets bytecode using a software operand stack. |
 | `gc_vm.rs` | Interprets bytecode with heap-allocated arrays and GC. |
 | `jit.rs` | Compiles bytecode to x86-64 machine code at runtime. |
@@ -658,20 +681,25 @@ VmResult {
 
 ## 10. API Surface
 
-### 10.1 External API (lib.rs exports)
+### 10.1 External API (selected lib.rs exports)
 
 ```rust
 // Types
 pub use token::{Token, TokenKind, Span};
 pub use lexer::Lexer;
-pub use ast::{Expr, Stmt, Program, Type, BinaryOp, UnaryOp};
-pub use parser::{Parser, ParseError};
-pub use sema::{SemanticAnalyzer, SemanticError};
-pub use compiler::{Compiler, CompiledProgram, Opcode, Instruction};
+pub use ast::{Expr, Stmt, Function, Program, Type, BinaryOp, UnaryOp};
+pub use parser::Parser;
+pub use sema::SemanticAnalyzer;
+pub use compiler::{Compiler, CompiledProgram, Opcode};
+pub use verifier::{Verifier, VerificationReport, BackendEligibility};
+pub use compare::{compare_backends, BackendComparisonReport};
+pub use audit::{replay_vm_trace, diff_vm_gc_traces};
+pub use trace::{TraceEvent, TraceOutcome, TraceDivergence};
+pub use fuzz::{run_fuzzer, FuzzConfig, FuzzReport};
 pub use vm::{Vm, VmResult, TrapCode};
 pub use gc_vm::{GcVm, GcVmResult, GcValue, HeapArray};
 pub use alloc::{BumpAllocator, FreeListAllocator, SlabAllocator, AllocatorStats};
-pub use gc::{GarbageCollector, GcPtr, TypeTag};
+pub use gc::{GarbageCollector, GcStats, TypeTag};
 pub use jit::{JitCompiler, ExecutableMemory, MachineCode, Reg};
 pub use optimizer::Optimizer;
 pub use repl::Repl;
@@ -689,10 +717,14 @@ pub fn run_jit(source: &str) -> Result<i64, String>;  // Linux x86-64 only
 | Parser | Lexer | Lexer provides complete token stream; no incremental |
 | Compiler | Parser | AST is well-formed (parse succeeded) |
 | Compiler | Sema | AST is semantically valid (sema succeeded) |
-| VM | Compiler | Instructions are valid opcodes with valid args |
-| VM | VM | Stack never underflows (compiler invariant) |
+| Verifier | Compiler | CompiledProgram metadata, stack effects, slots, calls, arrays, and jumps are structurally checkable |
+| VM / GcVm | Verifier and runtime preflight | Instructions must stay within shared limits before execution |
+| VM | VM | Stack operations must be guarded; malformed bytecode traps instead of panicking |
 | GcVm | GcVm | All ArrayRefs point to valid heap slots |
-| JIT | Compiler | Only linear, pure, single-function expression bytecode is compiled |
+| Comparator | Backends | Observable behavior is success/trap status, return value, trap code, and output |
+| Trace audit | VM / GcVm | Semantic trace events must be replayable and diffable |
+| Fuzzer | Public pipeline | Generated cases must be valid, terminating programs before audit checks run |
+| JIT | Verifier | Only eligible linear, pure, single-function expression bytecode is compiled |
 | Optimizer | Compiler | Can modify instructions in-place |
 
 ### 10.3 CLI Interface
@@ -704,14 +736,42 @@ OPTIONS:
   --tokens     Print tokens and exit
   --ast        Print AST and exit
   --ir         Print bytecode IR
+  --verify     Verify bytecode safety and backend eligibility
+  --compare-backends
+               Run VM, GC VM, optimized VM, and eligible JIT, then compare results
   --opt        Enable optimizations
   --gc         Use GC-integrated VM
-  --jit        Use JIT compiler (linear expressions only)
+  --jit        Use JIT compiler (linear expressions only, Linux x86-64)
   --debug      Enable debug output
   --bench      Show timing information
   --stats      Show allocator/GC/optimizer statistics
+  --trace-json <file>
+               Write reference VM or GC VM execution trace as JSON
+  --trace-replay
+               Verify reference VM trace determinism
+  --trace-diff
+               Compare VM and GC VM instruction traces
+  --audit-json <file>
+               Write trace replay/diff audit evidence as JSON
+  --fuzz <cases>
+               Generate deterministic programs and run the self-audit pipeline
+  --fuzz-seed <n>
+               Seed for --fuzz (decimal or 0x-prefixed hex)
+  --fuzz-artifacts <dir>
+               Directory for minimized failing repro artifacts
+  --fuzz-json <file>
+               Write a machine-readable fuzz audit summary
+  --fuzz-max-expr-depth <n>
+               Maximum generated expression depth
+  --fuzz-max-statements <n>
+               Maximum generated statements per main function
+  --fuzz-no-shrink
+               Keep the first failing generated program without shrinking
+  --fuzz-no-artifacts
+               Disable failure artifact output
   --repl       Start interactive REPL
   --eval <e>   Evaluate expression and exit
+  --no-color   Disable color output (compatibility no-op)
   --help       Print help
 ```
 
@@ -728,25 +788,30 @@ OPTIONS:
 | All identifiers resolve to declarations | Sema | Compile error |
 | All types match in expressions | Sema | Compile error |
 | Function main() exists | Sema | Compile error |
-| Stack is balanced (push/pop match) | Compiler | Stack underflow trap |
-| Local slots are allocated before use | Compiler | UndefinedLocal trap |
+| Stack is balanced (push/pop match) | Compiler + verifier + VM guards | Verification error or stack-underflow trap |
+| Local/global slots are in bounds | Compiler + verifier + VM preflight | Verification error or invalid-instruction trap |
+| Function calls match callee arity | Sema + verifier | Compile/verification error |
+| Local slots are initialized before use | Sema/compiler where possible, VM at runtime | UndefinedLocal trap |
 | Array indices are in bounds | VM runtime check | ArrayOOB trap |
 | Cycle count < MAX_CYCLES | VM runtime check | CycleLimit trap |
 | Frame count < MAX_FRAMES | VM runtime check | StackOverflow trap |
 | GC roots include all live references | GcVm collect_garbage | Use-after-free (silent corruption) |
+| VM and GC VM observable results agree | Comparator and trace diff | Audit failure |
+| Fuzz cases are deterministic by seed | Fuzzer RNG | Non-reproducible failure |
 | JIT code respects x86-64 ABI | JIT | Crash/corruption |
 
 ### 11.2 Known Violations / Weak Points
 
 | Issue | Severity | Mitigation |
 |-------|----------|------------|
-| Arena allocator barely used (44 bytes) | Low | Works, just not impressive |
+| Arena-backed AST is not the active parser representation | Low | Keep docs honest; treat it as support/experiment code |
 | JIT intentionally supports a narrow bytecode subset | Medium | Unsupported bytecode falls back to interpreter |
-| GC threshold hardcoded to 8 | Low | Works, but not tuned |
-| No GC for interpreter (only GcVm) | Low | Use --gc flag |
+| GC threshold is fixed at 8 array allocations | Low | Centralized in `limits.rs`; not tuned dynamically |
+| Default VM does not use the GC heap for arrays | Low | Use `--gc` when testing GC-managed array behavior |
 | Optimizer single-pass only | Low | Multiple constant folds don't chain |
 | mmap executable memory not freed on panic | Low | OS reclaims on exit |
 | Array bytecode is rejected by the JIT | Medium | Falls back to interpreter until safe lowering exists |
+| Fuzzer generates valid programs, not arbitrary invalid bytecode | Medium | Pair with verifier unit tests for malformed bytecode coverage |
 
 ---
 
@@ -844,9 +909,9 @@ OPTIONS:
 | AST depth | ~1000 | Stack overflow in recursive descent |
 | Functions | ~1000 | HashMap performance degrades |
 | Globals | 256 | Hardcoded VM constant |
-| Locals per function | ~32 | Stack frame size (256 bytes / 8) |
-| Instructions | ~10,000 | Hardcoded constant |
-| Operand stack depth | 1000 | Hardcoded constant |
+| Locals per function | 1024 slots | Shared VM/verifier limit |
+| Instructions | 10,000 | Shared VM/verifier limit |
+| Operand stack depth | 1000 | Shared VM/verifier limit |
 | Call stack depth | 100 | Hardcoded constant |
 | Cycles | 100,000 | Hardcoded constant |
 | Heap arrays (GcVm) | ~unlimited | Memory, GC pause time |
@@ -929,24 +994,21 @@ Array Scaling (GcVm):
 
 ## Appendix: File-to-Component Mapping
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| token.rs | ~50 | Token definitions |
-| lexer.rs | ~250 | Lexical analysis |
-| ast.rs | ~180 | AST node definitions |
-| parser.rs | ~630 | Recursive descent parser |
-| sema.rs | ~400 | Semantic analysis |
-| compiler.rs | ~640 | Bytecode compilation |
-| optimizer.rs | ~350 | Bytecode optimization |
-| vm.rs | ~640 | Stack-based interpreter |
-| gc_vm.rs | ~920 | GC-enabled interpreter |
-| jit.rs | ~970 | x86-64 JIT compiler |
-| alloc.rs | ~380 | Memory allocators |
-| gc.rs | ~280 | GC primitives |
-| repl.rs | ~430 | Interactive REPL |
-| main.rs | ~360 | CLI entry point |
-| lib.rs | ~110 | Public API |
-| **Total** | **~6,600** | |
+| File(s) | Purpose |
+|---------|---------|
+| `token.rs`, `lexer.rs`, `parser.rs`, `ast.rs` | Frontend syntax pipeline |
+| `sema.rs` | Semantic analysis |
+| `compiler.rs` | Bytecode compilation |
+| `limits.rs` | Shared runtime/verifier limits |
+| `verifier.rs` | Bytecode safety and backend eligibility |
+| `compare.rs` | Observable backend comparison |
+| `trace.rs`, `audit.rs` | Instruction trace model, replay, and VM/GC trace diff |
+| `fuzz.rs` | Deterministic self-audit fuzzer and shrinker |
+| `vm.rs`, `gc_vm.rs` | Reference VM and GC-integrated VM |
+| `optimizer.rs` | Bytecode optimization |
+| `jit.rs` | Experimental x86-64 JIT subset |
+| `alloc.rs`, `gc.rs`, `runtime.rs`, `arena_ast.rs` | Allocator, GC, runtime-value, and arena support |
+| `repl.rs`, `main.rs`, `lib.rs` | Interactive, CLI, and public API entry points |
 
 ---
 
@@ -961,12 +1023,17 @@ To rebuild this system from scratch:
 5. **Write semantic analyzer** (symbol tables, type checking)
 6. **Define bytecode** (Opcode enum, Instruction struct)
 7. **Write compiler** (AST → bytecode, two-pass for functions)
-8. **Write VM** (fetch-decode-execute loop, software stack)
-9. **Add traps** (div-zero, OOB, stack overflow, cycle limit)
-10. **Add optimizer** (constant folding, DCE)
-11. **Add GC VM** (GcValue tagged union, mark-sweep)
-12. **Add JIT** (x86-64 code generation, mmap executable)
-13. **Add CLI** (argument parsing, mode selection)
-14. **Add REPL** (stateful loop over accumulated definitions)
+8. **Centralize limits** (global slots, local slots, stack, frames, cycles, instructions)
+9. **Write verifier** (stack effects, jumps, slots, calls, arrays, backend eligibility)
+10. **Write VM** (fetch-decode-execute loop, software stack)
+11. **Add traps** (div-zero, OOB, stack overflow, cycle limit, invalid instruction)
+12. **Add optimizer** (constant folding, DCE)
+13. **Add GC VM** (GcValue tagged union, mark-sweep)
+14. **Add backend comparator** (VM, GC VM, optimized VM, eligible JIT)
+15. **Add trace tooling** (JSON trace, replay, VM/GC diff)
+16. **Add self-audit fuzzer** (deterministic generation, shrinking, artifacts)
+17. **Add JIT** (gated x86-64 code generation, mmap executable)
+18. **Add CLI** (argument parsing, mode selection)
+19. **Add REPL** (stateful loop over accumulated definitions)
 
 Each step is independently testable. The system is a pipeline where each stage consumes the output of the previous stage.

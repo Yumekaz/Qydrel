@@ -146,3 +146,29 @@ comparisons, logical not, stack pop/dup, and return.
 Bytecode with locals, globals, arrays, function calls, jumps/control flow,
 division, `print`, or multiple functions is rejected by the JIT and falls back
 to the VM.
+
+## Verification And Audit Surface
+
+The language contract is checked through compiled bytecode, not source text
+alone.
+
+`--verify` runs the bytecode verifier. It checks stack effects, jump targets,
+local/global slot bounds, function call arity, array metadata, shared limits,
+possible traps, and backend eligibility.
+
+`--compare-backends` runs the same compiled program through the reference VM,
+GC VM, optimized VM, and JIT when eligible. It compares success/trap status,
+return value, trap code, and printed output.
+
+`--trace-replay` verifies that the reference VM trace is deterministic across
+two runs. `--trace-diff` compares reference VM and GC VM traces at semantic
+instruction level. `--audit-json <file>` writes stable machine-readable
+evidence for either trace audit mode.
+
+`--fuzz <cases>` generates deterministic valid programs and runs compile,
+verification, backend comparison, trace replay, and VM/GC trace diff for each
+case. The fuzzer reports generator feature coverage, can write a run summary
+with `--fuzz-json <file>`, and writes a manifest with failure artifacts when
+`--fuzz-artifacts <dir>` is enabled. The fuzzer is an audit harness for the
+implemented subset; it is not a complete proof of all possible MiniLang
+programs or malformed bytecode.

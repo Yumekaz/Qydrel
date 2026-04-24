@@ -12,7 +12,7 @@ use crate::vm::Vm;
 use crate::{
     compare_backends, compile, diff_vm_gc_traces, replay_vm_trace, CompiledProgram, Verifier,
 };
-use std::fmt;
+use std::fmt::{self, Write};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -40,7 +40,23 @@ pub struct FuzzReport {
     pub cases_requested: usize,
     pub cases_executed: usize,
     pub success: bool,
+    pub coverage: FuzzCoverage,
     pub failure: Option<FuzzFailure>,
+}
+
+/// Aggregate generator feature coverage for a fuzzer run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FuzzCoverage {
+    pub cases: usize,
+    pub helper_functions: usize,
+    pub helper_calls: usize,
+    pub branches: usize,
+    pub loops: usize,
+    pub prints: usize,
+    pub global_array_reads: usize,
+    pub global_array_writes: usize,
+    pub local_array_reads: usize,
+    pub local_array_writes: usize,
 }
 
 /// First failing generated program, with minimized repro when shrinking is on.
@@ -49,6 +65,7 @@ pub struct FuzzFailure {
     pub case_index: usize,
     pub case_seed: u64,
     pub reason: FuzzFailureReason,
+    pub coverage_at_failure: FuzzCoverage,
     pub original_source: String,
     pub minimized_source: String,
     pub artifacts_dir: Option<PathBuf>,
@@ -75,10 +92,38 @@ struct HelperSig {
 struct ArrayBinding {
     name: String,
     size: usize,
+    scope: ArrayScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayScope {
+    Global,
+    Local,
+}
+
+#[derive(Debug, Clone)]
+struct ArrayAccess {
+    name: String,
+    index: usize,
+    scope: ArrayScope,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FeatureSet {
+    helper_functions: bool,
+    helper_calls: bool,
+    branches: bool,
+    loops: bool,
+    prints: bool,
+    global_array_reads: bool,
+    global_array_writes: bool,
+    local_array_reads: bool,
+    local_array_writes: bool,
 }
 
 struct GeneratedProgram {
     source: String,
+    features: FeatureSet,
 }
 
 struct ProgramGenerator {
@@ -90,6 +135,7 @@ struct ProgramGenerator {
     arrays: Vec<ArrayBinding>,
     local_arrays: Vec<ArrayBinding>,
     locals: Vec<String>,
+    features: FeatureSet,
     next_var: usize,
 }
 
@@ -101,12 +147,14 @@ struct Rng {
 /// Run deterministic MiniLang audit fuzzing.
 pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
     let mut rng = Rng::new(config.seed);
+    let mut coverage = FuzzCoverage::default();
 
     for case_index in 0..config.cases {
         let case_seed = rng.next_u64();
         let generated =
             ProgramGenerator::new(case_seed, config.max_expr_depth, config.max_statements)
                 .generate();
+        coverage.observe(&generated.features);
 
         if let Some(reason) = audit_source(&generated.source) {
             let minimized_source = if config.shrink {
@@ -114,6 +162,7 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
             } else {
                 generated.source.clone()
             };
+            let coverage_at_failure = coverage.clone();
 
             let (artifacts_dir, artifact_error) = match &config.artifact_dir {
                 Some(base_dir) => {
@@ -125,6 +174,8 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
                         &reason,
                         &generated.source,
                         &minimized_source,
+                        &coverage_at_failure,
+                        &generated.features,
                     ) {
                         Ok(path) => (Some(path), None),
                         Err(err) => (None, Some(err.to_string())),
@@ -138,10 +189,12 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
                 cases_requested: config.cases,
                 cases_executed: case_index + 1,
                 success: false,
+                coverage,
                 failure: Some(FuzzFailure {
                     case_index,
                     case_seed,
                     reason,
+                    coverage_at_failure,
                     original_source: generated.source,
                     minimized_source,
                     artifacts_dir,
@@ -156,6 +209,7 @@ pub fn run_fuzzer(config: FuzzConfig) -> FuzzReport {
         cases_requested: config.cases,
         cases_executed: config.cases,
         success: true,
+        coverage,
         failure: None,
     }
 }
@@ -181,6 +235,37 @@ impl FuzzFailureReason {
             FuzzFailureReason::BackendComparison(_) => "backend-comparison",
             FuzzFailureReason::TraceReplay(_) => "trace-replay",
             FuzzFailureReason::TraceDiff(_) => "trace-diff",
+        }
+    }
+}
+
+impl FuzzCoverage {
+    fn observe(&mut self, features: &FeatureSet) {
+        self.cases += 1;
+        self.helper_functions += usize::from(features.helper_functions);
+        self.helper_calls += usize::from(features.helper_calls);
+        self.branches += usize::from(features.branches);
+        self.loops += usize::from(features.loops);
+        self.prints += usize::from(features.prints);
+        self.global_array_reads += usize::from(features.global_array_reads);
+        self.global_array_writes += usize::from(features.global_array_writes);
+        self.local_array_reads += usize::from(features.local_array_reads);
+        self.local_array_writes += usize::from(features.local_array_writes);
+    }
+}
+
+impl FeatureSet {
+    fn record_array_read(&mut self, scope: ArrayScope) {
+        match scope {
+            ArrayScope::Global => self.global_array_reads = true,
+            ArrayScope::Local => self.local_array_reads = true,
+        }
+    }
+
+    fn record_array_write(&mut self, scope: ArrayScope) {
+        match scope {
+            ArrayScope::Global => self.global_array_writes = true,
+            ArrayScope::Local => self.local_array_writes = true,
         }
     }
 }
@@ -270,6 +355,8 @@ fn write_failure_artifacts(
     reason: &FuzzFailureReason,
     original_source: &str,
     minimized_source: &str,
+    coverage: &FuzzCoverage,
+    case_features: &FeatureSet,
 ) -> io::Result<PathBuf> {
     let case_dir = base_dir.join(format!(
         "seed_{:016x}_case_{:04}_case_seed_{:016x}",
@@ -280,6 +367,19 @@ fn write_failure_artifacts(
     fs::write(case_dir.join("original.lang"), original_source)?;
     fs::write(case_dir.join("minimized.lang"), minimized_source)?;
     fs::write(case_dir.join("failure.txt"), reason.to_string())?;
+    fs::write(
+        case_dir.join("manifest.txt"),
+        failure_manifest(
+            run_seed,
+            case_index,
+            case_seed,
+            reason,
+            original_source,
+            minimized_source,
+            coverage,
+            case_features,
+        ),
+    )?;
 
     if let Ok(compiled) = compile(minimized_source) {
         fs::write(case_dir.join("bytecode.txt"), disassemble(&compiled))?;
@@ -287,6 +387,36 @@ fn write_failure_artifacts(
     }
 
     Ok(case_dir)
+}
+
+fn failure_manifest(
+    run_seed: u64,
+    case_index: usize,
+    case_seed: u64,
+    reason: &FuzzFailureReason,
+    original_source: &str,
+    minimized_source: &str,
+    coverage: &FuzzCoverage,
+    case_features: &FeatureSet,
+) -> String {
+    format!(
+        "MiniLang Fuzz Failure Manifest\n\
+         run_seed: {run_seed:#018x}\n\
+         case_index: {case_index}\n\
+         case_seed: {case_seed:#018x}\n\
+         reason: {}\n\
+         original_source_hash: {:016x}\n\
+         minimized_source_hash: {:016x}\n\
+         repro_command: minilang --fuzz {} --fuzz-seed {run_seed:#018x}\n\
+         case_features: {}\n\
+         run_coverage_at_failure:\n{}",
+        reason.tag(),
+        stable_hash(original_source),
+        stable_hash(minimized_source),
+        case_index + 1,
+        format_feature_set(case_features),
+        coverage
+    )
 }
 
 fn write_trace_artifacts(case_dir: &Path, compiled: &CompiledProgram) -> io::Result<()> {
@@ -312,6 +442,7 @@ impl ProgramGenerator {
             arrays: Vec::new(),
             local_arrays: Vec::new(),
             locals: Vec::new(),
+            features: FeatureSet::default(),
             next_var: 0,
         }
     }
@@ -321,7 +452,10 @@ impl ProgramGenerator {
         self.generate_globals(&mut source);
         self.generate_helpers(&mut source);
         self.generate_main(&mut source);
-        GeneratedProgram { source }
+        GeneratedProgram {
+            source,
+            features: self.features,
+        }
     }
 
     fn generate_globals(&mut self, source: &mut String) {
@@ -339,6 +473,7 @@ impl ProgramGenerator {
             self.arrays.push(ArrayBinding {
                 name: name.clone(),
                 size,
+                scope: ArrayScope::Global,
             });
             source.push_str(&format!("int {}[{}];\n", name, size));
         }
@@ -350,6 +485,10 @@ impl ProgramGenerator {
 
     fn generate_helpers(&mut self, source: &mut String) {
         let count = self.rng.usize(3);
+        if count > 0 {
+            self.features.helper_functions = true;
+            self.features.branches = true;
+        }
         for index in 0..count {
             let arity = 1 + self.rng.usize(2);
             let name = format!("f{}", index);
@@ -398,7 +537,11 @@ impl ProgramGenerator {
         self.generate_local_arrays(source);
         self.generate_local_array_smoke(source);
 
-        let statement_count = 4 + self.rng.usize(self.max_statements.saturating_sub(3));
+        let statement_count = if self.max_statements <= 4 {
+            self.max_statements
+        } else {
+            4 + self.rng.usize(self.max_statements - 3)
+        };
         for _ in 0..statement_count {
             self.generate_main_statement(source);
         }
@@ -416,15 +559,20 @@ impl ProgramGenerator {
             self.local_arrays.push(ArrayBinding {
                 name: name.clone(),
                 size,
+                scope: ArrayScope::Local,
             });
             source.push_str(&format!("  int {}[{}];\n", name, size));
         }
     }
 
-    fn generate_local_array_smoke(&self, source: &mut String) {
+    fn generate_local_array_smoke(&mut self, source: &mut String) {
         if let Some(array) = self.local_arrays.first() {
-            source.push_str(&format!("  {}[0] = acc;\n", array.name));
-            source.push_str(&format!("  acc = (acc + {}[0]);\n", array.name));
+            let name = array.name.clone();
+            let scope = array.scope;
+            self.features.record_array_write(scope);
+            self.features.record_array_read(scope);
+            source.push_str(&format!("  {}[0] = acc;\n", name));
+            source.push_str(&format!("  acc = (acc + {}[0]);\n", name));
         }
     }
 
@@ -461,6 +609,7 @@ impl ProgramGenerator {
     }
 
     fn generate_if(&mut self, source: &mut String) {
+        self.features.branches = true;
         let condition = self.condition();
         let then_expr = self.int_expr();
         let else_expr = self.int_expr();
@@ -472,6 +621,7 @@ impl ProgramGenerator {
     }
 
     fn generate_bounded_loop(&mut self, source: &mut String) {
+        self.features.loops = true;
         let index_name = self.fresh_local();
         let limit = 1 + self.rng.usize(5);
         source.push_str(&format!("  int {} = 0;\n", index_name));
@@ -485,17 +635,22 @@ impl ProgramGenerator {
     }
 
     fn generate_print(&mut self, source: &mut String) {
+        self.features.prints = true;
         let expr = self.int_expr();
         source.push_str(&format!("  print {};\n", expr));
     }
 
     fn generate_array_store(&mut self, source: &mut String) {
-        let Some((name, index)) = self.array_access() else {
+        let Some(access) = self.array_access() else {
             self.generate_assignment(source);
             return;
         };
+        self.features.record_array_write(access.scope);
         let expr = self.int_expr();
-        source.push_str(&format!("  {}[{}] = {};\n", name, index, expr));
+        source.push_str(&format!(
+            "  {}[{}] = {};\n",
+            access.name, access.index, expr
+        ));
     }
 
     fn generate_array_acc_update(&mut self, source: &mut String) {
@@ -599,6 +754,7 @@ impl ProgramGenerator {
         arrays: &[ArrayBinding],
         depth: usize,
     ) -> String {
+        self.features.helper_calls = true;
         let helper_index = self.rng.usize(self.helpers.len());
         let helper = self.helpers[helper_index].clone();
         let args = (0..helper.arity)
@@ -617,6 +773,7 @@ impl ProgramGenerator {
         if !arrays.is_empty() && self.rng.chance(1, 4) {
             let index = self.rng.usize(arrays.len());
             let array = &arrays[index];
+            self.features.record_array_read(array.scope);
             let element = self.rng.usize(array.size);
             return format!("{}[{}]", array.name, element);
         }
@@ -635,11 +792,13 @@ impl ProgramGenerator {
     }
 
     fn array_read_expr(&mut self) -> Option<String> {
-        self.array_access()
-            .map(|(name, index)| format!("{}[{}]", name, index))
+        self.array_access().map(|access| {
+            self.features.record_array_read(access.scope);
+            format!("{}[{}]", access.name, access.index)
+        })
     }
 
-    fn array_access(&mut self) -> Option<(String, usize)> {
+    fn array_access(&mut self) -> Option<ArrayAccess> {
         let arrays = self.arrays_in_scope();
         if arrays.is_empty() {
             return None;
@@ -648,7 +807,11 @@ impl ProgramGenerator {
         let array_index = self.rng.usize(arrays.len());
         let array = &arrays[array_index];
         let element_index = self.rng.usize(array.size);
-        Some((array.name.clone(), element_index))
+        Some(ArrayAccess {
+            name: array.name.clone(),
+            index: element_index,
+            scope: array.scope,
+        })
     }
 
     fn small_literal(&mut self) -> i32 {
@@ -713,6 +876,9 @@ impl fmt::Display for FuzzReport {
             "  status: {}",
             if self.success { "passed" } else { "failed" }
         )?;
+        writeln!(f)?;
+        writeln!(f, "Coverage")?;
+        write!(f, "{}", self.coverage)?;
 
         if let Some(failure) = &self.failure {
             writeln!(f)?;
@@ -732,6 +898,64 @@ impl fmt::Display for FuzzReport {
     }
 }
 
+impl FuzzReport {
+    /// Serialize the run summary as stable JSON for CI artifacts and demos.
+    pub fn to_json(&self) -> String {
+        let mut out = String::new();
+        out.push('{');
+        write!(out, "\"seed\":\"{:#018x}\"", self.seed).expect("write to string cannot fail");
+        write!(out, ",\"cases_requested\":{}", self.cases_requested)
+            .expect("write to string cannot fail");
+        write!(out, ",\"cases_executed\":{}", self.cases_executed)
+            .expect("write to string cannot fail");
+        write!(out, ",\"success\":{}", self.success).expect("write to string cannot fail");
+        out.push_str(",\"coverage\":");
+        push_coverage_json(&mut out, &self.coverage);
+        out.push_str(",\"failure\":");
+        match &self.failure {
+            Some(failure) => push_failure_json(&mut out, failure),
+            None => out.push_str("null"),
+        }
+        out.push('}');
+        out
+    }
+}
+
+impl fmt::Display for FuzzCoverage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "  cases: {}", self.cases)?;
+        writeln!(
+            f,
+            "  cases with helper functions: {}",
+            self.helper_functions
+        )?;
+        writeln!(f, "  cases with helper calls: {}", self.helper_calls)?;
+        writeln!(f, "  cases with branches: {}", self.branches)?;
+        writeln!(f, "  cases with loops: {}", self.loops)?;
+        writeln!(f, "  cases with prints: {}", self.prints)?;
+        writeln!(
+            f,
+            "  cases with global array reads: {}",
+            self.global_array_reads
+        )?;
+        writeln!(
+            f,
+            "  cases with global array writes: {}",
+            self.global_array_writes
+        )?;
+        writeln!(
+            f,
+            "  cases with local array reads: {}",
+            self.local_array_reads
+        )?;
+        writeln!(
+            f,
+            "  cases with local array writes: {}",
+            self.local_array_writes
+        )
+    }
+}
+
 impl fmt::Display for FuzzFailureReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -743,6 +967,137 @@ impl fmt::Display for FuzzFailureReason {
             FuzzFailureReason::TraceReplay(msg) => write!(f, "trace replay failure:\n{}", msg),
             FuzzFailureReason::TraceDiff(msg) => write!(f, "trace diff failure:\n{}", msg),
         }
+    }
+}
+
+fn push_coverage_json(out: &mut String, coverage: &FuzzCoverage) {
+    out.push('{');
+    write!(out, "\"cases\":{}", coverage.cases).expect("write to string cannot fail");
+    write!(out, ",\"helper_functions\":{}", coverage.helper_functions)
+        .expect("write to string cannot fail");
+    write!(out, ",\"helper_calls\":{}", coverage.helper_calls)
+        .expect("write to string cannot fail");
+    write!(out, ",\"branches\":{}", coverage.branches).expect("write to string cannot fail");
+    write!(out, ",\"loops\":{}", coverage.loops).expect("write to string cannot fail");
+    write!(out, ",\"prints\":{}", coverage.prints).expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"global_array_reads\":{}",
+        coverage.global_array_reads
+    )
+    .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"global_array_writes\":{}",
+        coverage.global_array_writes
+    )
+    .expect("write to string cannot fail");
+    write!(out, ",\"local_array_reads\":{}", coverage.local_array_reads)
+        .expect("write to string cannot fail");
+    write!(
+        out,
+        ",\"local_array_writes\":{}",
+        coverage.local_array_writes
+    )
+    .expect("write to string cannot fail");
+    out.push('}');
+}
+
+fn push_failure_json(out: &mut String, failure: &FuzzFailure) {
+    out.push('{');
+    write!(out, "\"case_index\":{}", failure.case_index).expect("write to string cannot fail");
+    write!(out, ",\"case_seed\":\"{:#018x}\"", failure.case_seed)
+        .expect("write to string cannot fail");
+    out.push_str(",\"reason_tag\":");
+    push_json_string(out, failure.reason.tag());
+    out.push_str(",\"reason\":");
+    push_json_string(out, &failure.reason.to_string());
+    out.push_str(",\"coverage_at_failure\":");
+    push_coverage_json(out, &failure.coverage_at_failure);
+    out.push_str(",\"original_source_hash\":");
+    push_json_string(
+        out,
+        &format!("{:016x}", stable_hash(&failure.original_source)),
+    );
+    out.push_str(",\"minimized_source_hash\":");
+    push_json_string(
+        out,
+        &format!("{:016x}", stable_hash(&failure.minimized_source)),
+    );
+    out.push_str(",\"artifacts_dir\":");
+    match &failure.artifacts_dir {
+        Some(path) => push_json_string(out, &path.display().to_string()),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"artifact_error\":");
+    match &failure.artifact_error {
+        Some(error) => push_json_string(out, error),
+        None => out.push_str("null"),
+    }
+    out.push('}');
+}
+
+fn push_json_string(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch <= '\u{1f}' => {
+                write!(out, "\\u{:04x}", ch as u32).expect("write to string cannot fail");
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+}
+
+fn stable_hash(value: &str) -> u64 {
+    value
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
+fn format_feature_set(features: &FeatureSet) -> String {
+    let mut names = Vec::new();
+    if features.helper_functions {
+        names.push("helper-functions");
+    }
+    if features.helper_calls {
+        names.push("helper-calls");
+    }
+    if features.branches {
+        names.push("branches");
+    }
+    if features.loops {
+        names.push("loops");
+    }
+    if features.prints {
+        names.push("prints");
+    }
+    if features.global_array_reads {
+        names.push("global-array-reads");
+    }
+    if features.global_array_writes {
+        names.push("global-array-writes");
+    }
+    if features.local_array_reads {
+        names.push("local-array-reads");
+    }
+    if features.local_array_writes {
+        names.push("local-array-writes");
+    }
+
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(",")
     }
 }
 
@@ -762,6 +1117,11 @@ mod tests {
         let report = run_fuzzer(config);
         assert!(report.success, "{report:#?}");
         assert_eq!(report.cases_executed, 12);
+        assert_eq!(report.coverage.cases, 12);
+        assert_eq!(report.coverage.local_array_reads, 12);
+        assert_eq!(report.coverage.local_array_writes, 12);
+        assert!(report.to_json().contains("\"success\":true"));
+        assert!(report.to_json().contains("\"coverage\""));
     }
 
     #[test]
@@ -773,6 +1133,8 @@ mod tests {
         assert!(generated.source.contains("int la0["));
         assert!(generated.source.contains("la0[0] = acc;"));
         assert!(generated.source.contains("acc = (acc + la0[0]);"));
+        assert!(generated.features.local_array_reads);
+        assert!(generated.features.local_array_writes);
         assert!(
             audit_source(&generated.source).is_none(),
             "{}",
@@ -793,5 +1155,33 @@ mod tests {
         let shrunk = shrink_source(source, "compile");
         assert!(!shrunk.contains("print x;"));
         assert!(has_same_failure(&shrunk, "compile"));
+    }
+
+    #[test]
+    fn failure_manifest_includes_repro_and_hashes() {
+        let mut coverage = FuzzCoverage::default();
+        let mut features = FeatureSet::default();
+        features.record_array_read(ArrayScope::Local);
+        features.record_array_write(ArrayScope::Local);
+        coverage.observe(&features);
+
+        let manifest = failure_manifest(
+            0x5eed,
+            3,
+            0x1234,
+            &FuzzFailureReason::TraceDiff("different stack".to_string()),
+            "func main() { return 1; }\n",
+            "func main() { return 1; }\n",
+            &coverage,
+            &features,
+        );
+
+        assert!(manifest.contains("case_index: 3"));
+        assert!(manifest.contains("reason: trace-diff"));
+        assert!(
+            manifest.contains("repro_command: minilang --fuzz 4 --fuzz-seed 0x0000000000005eed")
+        );
+        assert!(manifest.contains("local-array-reads"));
+        assert!(manifest.contains("original_source_hash:"));
     }
 }

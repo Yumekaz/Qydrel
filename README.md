@@ -1,15 +1,25 @@
-# MiniLang - A Systems Programming Language Compiler in Rust
+# MiniLang - Compiler Correctness Lab in Rust
 
-A minimal language compiler demonstrating core systems programming concepts:
-- **Bytecode VM** interpreter for the full language
-- **Optional GC VM** with heap-allocated arrays
-- **Experimental x86-64 JIT compiler** for linear, pure, single-function expression bytecode
-- **Custom memory allocators** (bump, free-list, slab), used selectively and benchmarked
+MiniLang is a small Rust compiler/runtime used to check how one source program
+behaves across several execution paths. The core story is not language breadth;
+it is a verifier, backend comparison, replayable traces, VM/GC trace diffs, and
+a deterministic self-audit fuzzer.
+
+Current surface:
+- **Frontend pipeline**: lexer, parser, semantic analyzer, bytecode compiler
+- **Bytecode verifier**: stack effects, control-flow targets, slots, calls, limits, and backend eligibility
+- **Backend comparison**: reference VM, GC VM, optimized VM, and JIT when eligible
+- **Trace audit tooling**: JSON traces, replay checks, and VM-vs-GC instruction diffs
+- **Self-audit fuzzer**: deterministic valid-program generation with shrinking and artifacts
+- **Runtime systems pieces**: custom allocators, mark-sweep GC primitives, and a narrow x86-64 JIT
+
+This is intentionally not a production language. The language stays small so
+compiler/runtime invariants can be checked directly.
 
 ## Building
 
 ```bash
-cargo build --release
+cargo build --locked --release
 ```
 
 On Windows with the MSVC Rust toolchain, run from a Visual Studio Developer
@@ -17,42 +27,53 @@ Command Prompt or ensure the Visual C++ Build Tools and Windows SDK are
 installed. If Git's `usr/bin/link.exe` appears before MSVC's linker on `PATH`,
 Rust may fail during linking.
 
-## Usage
+## Core Commands
 
 ```bash
-# Run with interpreter
-./target/release/minilang examples/fibonacci.lang
+# Run with the reference VM
+cargo run --locked --release -- examples/fibonacci.lang
 
-# Run with JIT compiler (Linux x86-64 only, limited bytecode subset)
-./target/release/minilang examples/fibonacci.lang --jit
+# Run with the GC-backed VM
+cargo run --locked --release -- examples/arrays.lang --gc
 
 # Show bytecode IR
-./target/release/minilang examples/fibonacci.lang --ir
+cargo run --locked --release -- examples/fibonacci.lang --ir
 
 # Verify bytecode safety and backend eligibility
-./target/release/minilang examples/fibonacci.lang --verify
+cargo run --locked --release -- examples/fibonacci.lang --verify
 
 # Compare observable behavior across VM backends
-./target/release/minilang examples/fibonacci.lang --compare-backends
+cargo run --locked --release -- examples/fibonacci.lang --compare-backends
 
 # Write a replay-oriented JSON trace from the selected VM backend
-./target/release/minilang examples/hello.lang --trace-json trace.json
+cargo run --locked --release -- examples/hello.lang --trace-json trace.json
 
 # Check that the reference VM trace replays deterministically
-./target/release/minilang examples/hello.lang --trace-replay
+cargo run --locked --release -- examples/hello.lang --trace-replay --audit-json trace-replay.audit.json
 
 # Find the first instruction-level divergence between VM and GC VM
-./target/release/minilang examples/hello.lang --trace-diff
+cargo run --locked --release -- examples/hello.lang --trace-diff --audit-json trace-diff.audit.json
 
-# Generate 1,000 deterministic programs and audit every runtime path
-./target/release/minilang --fuzz 1000 --fuzz-seed 0x5eed
+# Generate deterministic programs and audit every runtime path
+cargo run --locked --release -- --fuzz 150 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts/seed-5eed --fuzz-json fuzz-summary-5eed.json
+cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xc0ffee --fuzz-artifacts fuzz-artifacts/seed-c0ffee --fuzz-json fuzz-summary-c0ffee.json
+
+# Run with JIT compiler when the bytecode is eligible (Linux x86-64 only)
+cargo run --locked --release -- examples/fibonacci.lang --jit
 
 # Benchmark mode
-./target/release/minilang examples/fibonacci.lang --bench
+cargo run --locked --release -- examples/fibonacci.lang --bench
 
 # Show allocator/GC stats
-./target/release/minilang examples/fibonacci.lang --stats
+cargo run --locked --release -- examples/fibonacci.lang --stats
 ```
+
+The JIT is deliberately gated. It accepts only a small linear expression subset
+on Linux x86-64; unsupported bytecode is skipped by the comparator and falls
+back to the VM in normal `--jit` execution.
+
+See [`docs/correctness-lab.md`](docs/correctness-lab.md) for the audit workflow
+and what each command proves.
 
 ## Project Structure
 
@@ -67,6 +88,10 @@ src/
 ├── sema.rs         # Semantic analyzer (type checking)
 ├── compiler.rs     # Bytecode compiler
 ├── optimizer.rs    # Bytecode optimization passes
+├── limits.rs       # Shared runtime/verifier limits
+├── verifier.rs     # Structural bytecode verifier and backend eligibility
+├── compare.rs      # Observable backend comparison
+├── trace.rs        # Replay-oriented instruction trace model
 ├── audit.rs        # Trace replay and backend trace diff reports
 ├── fuzz.rs         # Deterministic self-audit fuzzer and shrinker
 ├── vm.rs           # Stack-based VM interpreter
@@ -79,47 +104,7 @@ src/
 └── repl.rs         # Interactive REPL
 ```
 
-## Systems Engineering Features
-
-### Memory Allocators (`src/alloc.rs`)
-
-Three allocator implementations:
-
-1. **Bump Allocator**: O(1) allocation, bulk deallocation
-   - Perfect for compiler phases with known lifetimes
-   - Zero fragmentation, cache-friendly
-
-2. **Free-List Allocator**: General purpose with coalescing
-   - First-fit allocation strategy
-   - Adjacent block coalescing on free
-
-3. **Slab Allocator**: Fixed-size object pools
-   - Extremely fast for uniform allocations
-   - No external fragmentation
-
-### Garbage Collector (`src/gc.rs`, `src/gc_vm.rs`)
-
-Mark-sweep GC primitives plus a GC-integrated VM path:
-- Object headers with type tags and mark bits
-- Root set management
-- Automatic collection at threshold
-- Heap arrays in `--gc` mode
-
-### JIT Compiler (`src/jit.rs`)
-
-x86-64 native code generation:
-- Direct machine code emission (no LLVM)
-- System V AMD64 ABI compliance
-- Executable memory via mmap/mprotect
-- Current scope: linear, pure, single-function expression bytecode
-- Unsupported bytecode, including locals, globals, arrays, calls, jumps, division, and `print`, falls back to the VM
-
-### Bytecode VM (`src/vm.rs`)
-
-Stack-based interpreter:
-- 30+ bytecode instructions
-- Call stack with frames
-- Runtime error trapping
+## Correctness Lab Surface
 
 ### Bytecode Verifier (`src/verifier.rs`)
 
@@ -153,17 +138,50 @@ Deterministic generated-program testing:
 - `--fuzz <cases>` generates valid, terminating MiniLang programs from a seed
 - Generated programs cover initialized scalars, bounded loops, helper functions, prints, and in-bounds global/local array reads/writes
 - Every case runs compile, verification, backend comparison, trace replay, and VM/GC trace diff
-- On first failure, the fuzzer shrinks the repro and writes source, bytecode, traces, and failure metadata under `fuzz-artifacts/`
-- CI runs a fixed-seed fuzz audit on Linux and uploads `fuzz-artifacts/` when the fuzz step fails
+- Reports generator feature coverage and can write a machine-readable run summary with `--fuzz-json <file>`
+- On first failure, the fuzzer shrinks the repro and writes source, bytecode, traces, a manifest, and failure metadata under `fuzz-artifacts/`
+- CI runs two fixed-seed fuzz audits on Linux, uploads fuzz summary JSON, and uploads `fuzz-artifacts/` when the fuzz step fails
+
+## Runtime And Systems Components
+
+### Bytecode VM (`src/vm.rs`)
+
+Stack-based reference interpreter:
+- Executes the full current bytecode language
+- Uses explicit call frames, runtime traps, and shared hard limits
+- Acts as the comparator reference for observable behavior
+
+### Garbage Collector (`src/gc.rs`, `src/gc_vm.rs`)
+
+Mark-sweep GC primitives plus a GC-integrated VM path:
+- Object headers with type tags and mark bits
+- Root set management from stack, globals, and call frames
+- Automatic collection at threshold
+- Heap arrays in `--gc` mode
+
+### JIT Compiler (`src/jit.rs`)
+
+x86-64 native code generation:
+- Direct machine code emission with mmap/mprotect on Linux x86-64
+- Current scope: linear, pure, single-function expression bytecode
+- Unsupported bytecode, including locals, globals, arrays, calls, jumps, division, and `print`, falls back to the VM
+
+### Memory Allocators (`src/alloc.rs`)
+
+Three allocator implementations:
+
+1. **Bump Allocator**: used for compiler string interning/statistics
+2. **Free-List Allocator**: implemented and benchmarked as a general-purpose allocator
+3. **Slab Allocator**: implemented and benchmarked for fixed-size allocations
 
 ## Benchmarking
 
 ```bash
 # Run benchmarks
-cargo bench
+cargo bench --locked
 
 # Profile with perf (Linux)
-cargo build --release
+cargo build --locked --release
 perf record -g ./target/release/minilang examples/fibonacci.lang --bench
 perf report
 ```

@@ -12,10 +12,12 @@
 | Resource | Limit |
 |----------|-------|
 | Global variables | 256 slots |
+| Local variables | 1024 slots |
 | Call frames | 100 max |
 | Operand stack | 1000 entries |
 | Execution cycles | 100,000 max |
 | Instructions | 10,000 max |
+| GC collection threshold | 8 array allocations |
 
 ### Trap Codes
 | Code | Name | Description |
@@ -161,3 +163,40 @@ Example:
 [   2] LoadGlobal 0 0
 [   3] Return 0 0
 ```
+
+## Verification And Audit Commands
+
+Runtime behavior is checked by several CLI modes that all operate after parse,
+semantic analysis, and bytecode compilation:
+
+```bash
+cargo run --locked --release -- examples/hello.lang --verify
+cargo run --locked --release -- examples/hello.lang --compare-backends
+cargo run --locked --release -- examples/hello.lang --trace-replay --audit-json trace-replay.audit.json
+cargo run --locked --release -- examples/hello.lang --trace-diff --audit-json trace-diff.audit.json
+cargo run --locked --release -- --fuzz 150 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts/seed-5eed --fuzz-json fuzz-summary-5eed.json
+```
+
+`--verify` checks structural bytecode safety and backend eligibility. It can
+report possible runtime traps such as divide-by-zero or unbounded recursion,
+but it does not execute the program.
+
+`--compare-backends` executes the reference VM, GC VM, optimized VM, and the JIT
+only when the verifier marks the JIT eligible. It compares observable behavior:
+success/trap status, return value, trap code, and printed output.
+
+`--trace-replay` runs the reference VM twice with tracing enabled and checks
+that the trace and final observable result replay deterministically.
+
+`--trace-diff` compares reference VM and GC VM traces at semantic instruction
+level. Allocation-specific representation differences are normalized before
+the first divergence is reported.
+
+`--audit-json <file>` can be combined with `--trace-replay` or `--trace-diff`
+to write stable evidence JSON with trace summaries and fingerprints.
+
+`--fuzz` generates valid, terminating programs from a deterministic seed. Each
+case runs compile, verification, backend comparison, trace replay, and VM/GC
+trace diff. On failure it writes a minimized repro and trace artifacts when
+`--fuzz-artifacts` is provided. `--fuzz-json <file>` writes a machine-readable
+run summary with generator feature coverage.

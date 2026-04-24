@@ -1105,6 +1105,11 @@ ret
 
 ### 8.5 Opcode → x86-64 Translation
 
+The snippets below are reconstruction notes for the JIT design. The current
+runtime only claims the gated subset listed at the top of this section. Opcodes
+outside that subset are not a supported JIT surface today and should fall back
+to the VM path.
+
 #### LoadConst
 ```asm
 mov eax, imm32      ; B8 <imm32>
@@ -1359,6 +1364,12 @@ minilang-rs/
 │   ├── parser.rs       # Recursive descent parser (~630 lines)
 │   ├── sema.rs         # Semantic analysis (~400 lines)
 │   ├── compiler.rs     # AST → Bytecode (~640 lines)
+│   ├── limits.rs       # Shared runtime/verifier limits
+│   ├── verifier.rs     # Bytecode safety and backend eligibility
+│   ├── compare.rs      # Backend observable-behavior comparison
+│   ├── trace.rs        # Instruction trace event model
+│   ├── audit.rs        # Trace replay and VM/GC trace diff reports
+│   ├── fuzz.rs         # Deterministic self-audit fuzzer
 │   ├── optimizer.rs    # Bytecode optimization (~350 lines)
 │   ├── vm.rs           # Stack-based interpreter (~640 lines)
 │   ├── gc_vm.rs        # GC-enabled interpreter (~920 lines)
@@ -1389,15 +1400,20 @@ minilang-rs/
 4. **parser.rs** - Implement recursive descent
 5. **sema.rs** - Implement semantic checks
 6. **compiler.rs** - Define Opcode, implement compilation
-7. **vm.rs** - Implement fetch-decode-execute loop
-8. **Test everything above** - Should pass basic tests
-9. **optimizer.rs** - Add optimizations
-10. **gc_vm.rs** - Add GC support
-11. **jit.rs** - Add x86-64 codegen
-12. **repl.rs** - Add interactive mode
-13. **main.rs** - Wire up CLI
-14. **alloc.rs** - Add allocators (optional, for stats)
-15. **gc.rs** - Add GC primitives (used by gc_vm)
+7. **limits.rs** - Centralize VM/verifier ceilings
+8. **verifier.rs** - Check bytecode structure and backend eligibility
+9. **vm.rs** - Implement fetch-decode-execute loop
+10. **Test everything above** - Should pass basic tests
+11. **compare.rs** - Add observable backend comparison
+12. **trace.rs / audit.rs** - Add trace JSON, replay, and VM/GC trace diff
+13. **fuzz.rs** - Add deterministic valid-program self-audit fuzzing
+14. **optimizer.rs** - Add optimizations
+15. **gc_vm.rs** - Add GC support
+16. **jit.rs** - Add gated x86-64 codegen
+17. **repl.rs** - Add interactive mode
+18. **main.rs** - Wire up CLI
+19. **alloc.rs** - Add allocators (optional, for stats)
+20. **gc.rs** - Add GC primitives (used by gc_vm)
 
 ---
 

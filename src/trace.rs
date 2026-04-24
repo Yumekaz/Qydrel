@@ -42,6 +42,20 @@ pub struct TraceDivergence {
     pub right: String,
 }
 
+/// Stable machine-readable summary of an execution trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceSummary {
+    pub event_count: usize,
+    pub first_pc: Option<usize>,
+    pub last_pc: Option<usize>,
+    pub final_stack_depth: usize,
+    pub final_stack_top: Option<i64>,
+    pub jumps: usize,
+    pub exits: usize,
+    pub traps: usize,
+    pub fingerprint: u64,
+}
+
 impl TraceDivergence {
     fn new(event_index: usize, field: &str, left: String, right: String) -> Self {
         Self {
@@ -50,6 +64,20 @@ impl TraceDivergence {
             left,
             right,
         }
+    }
+}
+
+impl TraceSummary {
+    /// Return the fingerprint as fixed-width lowercase hexadecimal.
+    pub fn fingerprint_hex(&self) -> String {
+        format!("{:016x}", self.fingerprint)
+    }
+
+    /// Serialize this summary as a stable JSON object.
+    pub fn to_json(&self) -> String {
+        let mut out = String::new();
+        push_trace_summary_json(&mut out, self);
+        out
     }
 }
 
@@ -119,6 +147,64 @@ pub fn first_semantic_trace_divergence(
             "<end>".to_string(),
         )),
     }
+}
+
+/// Build a stable, compact summary for a trace.
+pub fn summarize_trace(events: &[TraceEvent]) -> TraceSummary {
+    let mut jumps = 0;
+    let mut exits = 0;
+    let mut traps = 0;
+
+    for event in events {
+        match &event.outcome {
+            TraceOutcome::Continue => {}
+            TraceOutcome::Jump => jumps += 1,
+            TraceOutcome::Exit => exits += 1,
+            TraceOutcome::Trap { .. } => traps += 1,
+        }
+    }
+
+    let final_stack = events
+        .last()
+        .map(|event| event.stack_after.as_slice())
+        .unwrap_or(&[]);
+
+    TraceSummary {
+        event_count: events.len(),
+        first_pc: events.first().map(|event| event.pc),
+        last_pc: events.last().map(|event| event.pc),
+        final_stack_depth: final_stack.len(),
+        final_stack_top: final_stack.last().copied(),
+        jumps,
+        exits,
+        traps,
+        fingerprint: trace_fingerprint(events),
+    }
+}
+
+/// Return a deterministic fingerprint over every observable trace field.
+pub fn trace_fingerprint(events: &[TraceEvent]) -> u64 {
+    let mut hasher = StableHasher::new();
+    hasher.write_bytes(b"minilang.trace.v1");
+    hasher.write_usize(events.len());
+
+    for event in events {
+        hash_event(&mut hasher, event);
+    }
+
+    hasher.finish()
+}
+
+/// Serialize a trace summary as a stable JSON object.
+pub fn trace_summary_to_json(backend: &str, events: &[TraceEvent]) -> String {
+    let summary = summarize_trace(events);
+    let mut out = String::new();
+    out.push_str("{\n  \"backend\": ");
+    push_json_string(&mut out, backend);
+    out.push_str(",\n  \"summary\": ");
+    push_trace_summary_json(&mut out, &summary);
+    out.push_str("\n}");
+    out
 }
 
 /// Serialize trace events as a stable JSON object.
@@ -327,6 +413,33 @@ fn summarize_event(event: &TraceEvent) -> String {
     )
 }
 
+pub(crate) fn stable_fingerprint_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = StableHasher::new();
+    hasher.write_bytes(b"minilang.audit.v1");
+    hasher.write_usize(bytes.len());
+    hasher.write_bytes(bytes);
+    hasher.finish()
+}
+
+pub(crate) fn push_trace_summary_json(out: &mut String, summary: &TraceSummary) {
+    out.push('{');
+    write!(out, "\"event_count\":{}", summary.event_count).expect("write to string cannot fail");
+    out.push_str(",\"first_pc\":");
+    push_optional_usize(out, summary.first_pc);
+    out.push_str(",\"last_pc\":");
+    push_optional_usize(out, summary.last_pc);
+    write!(out, ",\"final_stack_depth\":{}", summary.final_stack_depth)
+        .expect("write to string cannot fail");
+    out.push_str(",\"final_stack_top\":");
+    push_optional_i64(out, summary.final_stack_top);
+    write!(out, ",\"jumps\":{}", summary.jumps).expect("write to string cannot fail");
+    write!(out, ",\"exits\":{}", summary.exits).expect("write to string cannot fail");
+    write!(out, ",\"traps\":{}", summary.traps).expect("write to string cannot fail");
+    out.push_str(",\"fingerprint\":");
+    push_json_string(out, &summary.fingerprint_hex());
+    out.push('}');
+}
+
 fn push_event_json(out: &mut String, event: &TraceEvent) {
     out.push('{');
     write!(out, "\"cycle\":{}", event.cycle).expect("write to string cannot fail");
@@ -377,7 +490,7 @@ fn push_i64_array(out: &mut String, values: &[i64]) {
     out.push(']');
 }
 
-fn push_json_string(out: &mut String, value: &str) {
+pub(crate) fn push_json_string(out: &mut String, value: &str) {
     out.push('"');
     for ch in value.chars() {
         match ch {
@@ -393,6 +506,105 @@ fn push_json_string(out: &mut String, value: &str) {
         }
     }
     out.push('"');
+}
+
+fn push_optional_usize(out: &mut String, value: Option<usize>) {
+    match value {
+        Some(value) => write!(out, "{}", value).expect("write to string cannot fail"),
+        None => out.push_str("null"),
+    }
+}
+
+fn push_optional_i64(out: &mut String, value: Option<i64>) {
+    match value {
+        Some(value) => write!(out, "{}", value).expect("write to string cannot fail"),
+        None => out.push_str("null"),
+    }
+}
+
+fn hash_event(hasher: &mut StableHasher, event: &TraceEvent) {
+    hasher.write_u64(event.cycle);
+    hasher.write_usize(event.pc);
+    hasher.write_string(&event.opcode);
+    hasher.write_i32(event.arg1);
+    hasher.write_i32(event.arg2);
+    hash_i64_slice(hasher, &event.stack_before);
+    hash_i64_slice(hasher, &event.stack_after);
+    hasher.write_usize(event.frame_depth_before);
+    hasher.write_usize(event.frame_depth_after);
+    hasher.write_usize(event.next_pc);
+    hash_outcome(hasher, &event.outcome);
+}
+
+fn hash_i64_slice(hasher: &mut StableHasher, values: &[i64]) {
+    hasher.write_usize(values.len());
+    for value in values {
+        hasher.write_i64(*value);
+    }
+}
+
+fn hash_outcome(hasher: &mut StableHasher, outcome: &TraceOutcome) {
+    match outcome {
+        TraceOutcome::Continue => hasher.write_u8(0),
+        TraceOutcome::Jump => hasher.write_u8(1),
+        TraceOutcome::Exit => hasher.write_u8(2),
+        TraceOutcome::Trap { code, message } => {
+            hasher.write_u8(3);
+            hasher.write_u8(*code as u8);
+            hasher.write_string(message);
+        }
+    }
+}
+
+struct StableHasher {
+    state: u64,
+}
+
+impl StableHasher {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self {
+            state: Self::OFFSET,
+        }
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.state ^= u64::from(*byte);
+            self.state = self.state.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.write_bytes(&[value]);
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    fn write_i64(&mut self, value: i64) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    fn write_i32(&mut self, value: i32) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+
+    fn write_string(&mut self, value: &str) {
+        self.write_usize(value.len());
+        self.write_bytes(value.as_bytes());
+    }
+
+    fn finish(&self) -> u64 {
+        self.state
+    }
 }
 
 impl fmt::Display for TraceDivergence {
@@ -432,6 +644,44 @@ mod tests {
 
         let json = events_to_json("VM", &[event]);
         assert!(json.contains("LoadConst\\\"x"));
+    }
+
+    #[test]
+    fn summarizes_trace_with_stable_fingerprint() {
+        let event = sample_event();
+        let summary = summarize_trace(std::slice::from_ref(&event));
+
+        assert_eq!(summary.event_count, 1);
+        assert_eq!(summary.first_pc, Some(0));
+        assert_eq!(summary.last_pc, Some(0));
+        assert_eq!(summary.final_stack_depth, 1);
+        assert_eq!(summary.final_stack_top, Some(42));
+        assert_eq!(summary.fingerprint, trace_fingerprint(&[event]));
+        assert_eq!(summary.fingerprint_hex().len(), 16);
+    }
+
+    #[test]
+    fn trace_fingerprint_changes_when_observable_trace_changes() {
+        let left = sample_event();
+        let mut right = sample_event();
+        right.stack_after = vec![43];
+
+        assert_ne!(trace_fingerprint(&[left]), trace_fingerprint(&[right]));
+    }
+
+    #[test]
+    fn serializes_trace_summary_json() {
+        let event = sample_event();
+        let summary = summarize_trace(std::slice::from_ref(&event));
+        let json = trace_summary_to_json("VM", &[event]);
+
+        assert!(json.contains("\"backend\": \"VM\""));
+        assert!(json.contains("\"event_count\":1"));
+        assert!(json.contains("\"final_stack_top\":42"));
+        assert!(json.contains(&format!(
+            "\"fingerprint\":\"{}\"",
+            summary.fingerprint_hex()
+        )));
     }
 
     #[test]

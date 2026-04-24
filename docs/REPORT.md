@@ -2,21 +2,44 @@
 
 ## Overview
 
-This is a complete rewrite of the MiniLang compiler from Python to Rust, with additional systems programming features demonstrating low-level expertise.
+MiniLang is a Rust compiler/runtime for a deliberately small imperative
+language. The current project is best described as a compiler correctness lab:
+it has a normal frontend and bytecode VM, but the strongest evidence comes from
+the bytecode verifier, backend comparator, replayable traces, VM/GC trace diff,
+and deterministic self-audit fuzzer.
 
-## Feature Parity with Python Version
+This report describes what is implemented today. It does not claim MiniLang is
+a production language or a broad compiler framework.
 
-### ✅ Fully Implemented
+## Current Implementation Status
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Lexer | ✅ | Single-pass lexer, handles all tokens |
-| Parser | ✅ | Recursive descent, no generators |
-| AST | ✅ | Rust enums instead of dataclasses |
-| Semantic Analyzer | ✅ | Scope, types, main check |
-| IR/Bytecode | ✅ | Same opcodes |
-| Stack-based VM | ✅ | Explicit frame stack |
-| CLI flags | ✅ | --tokens, --ast, --ir, --debug, --bench, --stats, --opt, --repl, --eval |
+| Lexer / parser / AST | Implemented | Recursive-descent parser over the current MiniLang grammar |
+| Semantic analyzer | Implemented | Type, scope, function, array, and `main` checks |
+| Bytecode compiler | Implemented | Stack-based bytecode plus function/global metadata |
+| Reference VM | Implemented | Explicit frames, traps, shared runtime limits |
+| GC VM | Implemented | Heap arrays with mark-sweep collection path |
+| Optimizer | Implemented | Constant folding, strength reduction, dead-code cleanup |
+| Bytecode verifier | Implemented | Stack effects, jump targets, slots, calls, arrays, limits, backend eligibility |
+| Backend comparator | Implemented | Compares VM, GC VM, optimized VM, and eligible JIT observable behavior |
+| Trace audit | Implemented | JSON traces, reference replay, VM-vs-GC trace diff |
+| Self-audit fuzzer | Implemented | Deterministic valid-program generation, shrinking, failure artifacts |
+| JIT | Experimental | Linux x86-64 only, linear pure expression subset |
+
+## Correctness Audit Commands
+
+```bash
+cargo run --locked --release -- examples/hello.lang --verify
+cargo run --locked --release -- examples/hello.lang --compare-backends
+cargo run --locked --release -- examples/hello.lang --trace-json trace.json
+cargo run --locked --release -- examples/hello.lang --trace-replay --audit-json trace-replay.audit.json
+cargo run --locked --release -- examples/hello.lang --trace-diff --audit-json trace-diff.audit.json
+cargo run --locked --release -- --fuzz 150 --fuzz-seed 0x5eed --fuzz-artifacts fuzz-artifacts/seed-5eed --fuzz-json fuzz-summary-5eed.json
+cargo run --locked --release -- --fuzz 150 --fuzz-seed 0xc0ffee --fuzz-artifacts fuzz-artifacts/seed-c0ffee --fuzz-json fuzz-summary-c0ffee.json
+```
+
+CI runs the standard Rust checks plus two fixed-seed fuzz audits on Linux.
 
 ## Systems Programming Features
 
@@ -157,33 +180,64 @@ perf report
 instruments -t "Time Profiler" ./target/release/minilang examples/bench.lang
 ```
 
-## Code Statistics
+### 7. Correctness Audit Surface
 
-| Component | Lines | Purpose |
-|-----------|-------|---------|
-| token.rs | 134 | Token definitions |
-| lexer.rs | 249 | Lexical analysis |
-| ast.rs | 183 | AST node definitions |
-| arena_ast.rs | 350 | Arena-allocated AST |
-| parser.rs | 627 | Recursive descent parser |
-| sema.rs | 486 | Semantic analysis |
-| compiler.rs | 586 | Bytecode generation |
-| optimizer.rs | 350 | Optimization passes |
-| vm.rs | 600 | Bytecode interpreter |
-| runtime.rs | 400 | GC-managed values |
-| jit.rs | 800 | x86-64 JIT compiler |
-| alloc.rs | 573 | Custom allocators |
-| gc.rs | 439 | Mark-sweep GC |
-| repl.rs | 430 | Interactive REPL |
-| **Total** | **~6,200** | |
+**Verifier (`src/verifier.rs`):**
+- Validates stack effects, control-flow targets, slot bounds, function call
+  arity, array metadata, and shared limits before execution.
+- Reports backend eligibility, including why the JIT is skipped.
+
+**Backend comparator (`src/compare.rs`):**
+- Runs the reference VM, GC VM, optimized VM, and JIT when eligible.
+- Compares success/trap status, return value, trap code, and output.
+
+**Trace audit (`src/trace.rs`, `src/audit.rs`):**
+- Emits JSON instruction events for VM and GC VM execution.
+- Replays the reference VM trace and reports the first trace divergence.
+- Compares VM and GC VM traces after normalizing semantic state.
+
+**Self-audit fuzzer (`src/fuzz.rs`):**
+- Generates valid terminating programs from deterministic seeds.
+- Covers scalar locals/globals, helper calls, bounded loops, prints, and
+  in-bounds global/local array reads and writes.
+- Reports generator feature coverage, can write JSON run summaries, and on
+  failure writes minimized source, bytecode, trace JSON, a manifest, and
+  failure text under the selected `fuzz-artifacts/` directory.
+
+## Source Map
+
+| Component | Purpose |
+|-----------|---------|
+| `token.rs`, `lexer.rs`, `parser.rs`, `ast.rs` | Frontend syntax pipeline |
+| `sema.rs` | Semantic checks for names, types, arrays, functions, and `main` |
+| `compiler.rs` | AST to stack bytecode and metadata |
+| `limits.rs` | Shared runtime/verifier ceilings |
+| `verifier.rs` | Bytecode safety and backend eligibility |
+| `compare.rs` | Observable backend comparison |
+| `trace.rs`, `audit.rs` | Instruction trace data, replay, and VM/GC trace diff |
+| `fuzz.rs` | Deterministic self-audit fuzzer and shrinker |
+| `vm.rs`, `gc_vm.rs` | Reference VM and GC-backed VM |
+| `optimizer.rs` | Bytecode optimization passes |
+| `jit.rs` | Experimental Linux x86-64 JIT subset |
+| `alloc.rs`, `gc.rs`, `runtime.rs`, `arena_ast.rs` | Allocator, GC, runtime-value, and arena experiments/support |
+| `repl.rs`, `main.rs` | Interactive and CLI entry points |
 
 ## Interview Talking Points
+
+### Correctness Lab
+"The strongest part of the project is the audit harness: compiled bytecode is
+verified structurally, then the same program is compared across the VM, GC VM,
+optimized VM, and eligible JIT. Trace replay and VM/GC trace diff make backend
+divergence reproducible instead of just saying a test failed."
 
 ### Memory Management
 "The project includes custom bump/free-list/slab allocators. The compiler currently uses the bump allocator for string interning, while arena-backed AST types are implemented separately but not wired into the parser. The `--gc` VM heap-allocates arrays and traces references from the stack, globals, and call frames."
 
 ### JIT Compilation  
-"The JIT compiler emits real x86-64 machine code - I handle REX prefixes for 64-bit operations, ModR/M byte encoding for register operands, and proper memory protection via mmap/mprotect. It follows the System V AMD64 calling convention, but its supported source subset is deliberately small today: linear pure expressions in a single `main` function."
+"The JIT compiler emits x86-64 machine code with REX prefixes, ModR/M encoding,
+and mmap/mprotect executable memory. It follows the System V AMD64 calling
+convention, but its supported source subset is deliberately small today: linear
+pure expressions in a single `main` function."
 
 ### Optimization
 "I implemented classic compiler optimizations - constant folding evaluates expressions like `10 + 20` at compile time, strength reduction replaces expensive operations like `x * 1` with identity, and dead code elimination uses control flow analysis to remove unreachable instructions."
@@ -207,17 +261,23 @@ instruments -t "Time Profiler" ./target/release/minilang examples/bench.lang
 
 ```bash
 # Build
-cargo build --release
+cargo build --locked --release
 
 # Run tests
-cargo test
+cargo test --locked --all-targets --all-features
 
-# Run with optimizations
-./target/release/minilang program.lang --opt
+# Run with optimizations through Cargo
+cargo run --locked --release -- program.lang --opt
+
+# Run the correctness audit surface on one example
+cargo run --locked --release -- examples/hello.lang --verify
+cargo run --locked --release -- examples/hello.lang --compare-backends
+cargo run --locked --release -- examples/hello.lang --trace-replay --audit-json trace-replay.audit.json
+cargo run --locked --release -- examples/hello.lang --trace-diff --audit-json trace-diff.audit.json
 
 # Start REPL
-./target/release/minilang --repl
+cargo run --locked --release -- --repl
 
 # Evaluate expression
-./target/release/minilang --eval "2 + 3 * 4"
+cargo run --locked --release -- --eval "2 + 3 * 4"
 ```

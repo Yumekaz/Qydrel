@@ -35,17 +35,29 @@ fn print_usage() {
     eprintln!("  --bench      Run with timing information");
     eprintln!("  --stats      Show allocator/GC/optimizer statistics");
     eprintln!("  --trace-json <file>");
-    eprintln!("               Write reference VM execution trace as JSON");
+    eprintln!("               Write selected VM execution trace as JSON");
     eprintln!("  --trace-replay");
     eprintln!("               Verify reference VM trace determinism");
     eprintln!("  --trace-diff");
     eprintln!("               Compare VM and GC VM instruction traces");
+    eprintln!("  --audit-json <file>");
+    eprintln!("               Write trace replay/diff audit evidence as JSON");
     eprintln!("  --fuzz <cases>");
     eprintln!("               Generate deterministic programs and run the self-audit pipeline");
     eprintln!("  --fuzz-seed <n>");
     eprintln!("               Seed for --fuzz (decimal or 0x-prefixed hex)");
     eprintln!("  --fuzz-artifacts <dir>");
     eprintln!("               Directory for minimized failing repro artifacts");
+    eprintln!("  --fuzz-json <file>");
+    eprintln!("               Write a machine-readable fuzz audit summary");
+    eprintln!("  --fuzz-max-expr-depth <n>");
+    eprintln!("               Maximum generated expression depth");
+    eprintln!("  --fuzz-max-statements <n>");
+    eprintln!("               Maximum generated statements per main function");
+    eprintln!("  --fuzz-no-shrink");
+    eprintln!("               Keep the first failing generated program without shrinking");
+    eprintln!("  --fuzz-no-artifacts");
+    eprintln!("               Disable failure artifact output");
     eprintln!("  --repl       Start interactive REPL");
     eprintln!("  --eval <e>   Evaluate expression and exit");
     eprintln!("  --no-color   Disable color output (no-op, for compatibility)");
@@ -74,9 +86,15 @@ fn main() {
     let mut trace_json_path: Option<String> = None;
     let mut trace_replay = false;
     let mut trace_diff = false;
+    let mut audit_json_path: Option<PathBuf> = None;
     let mut fuzz_cases: Option<usize> = None;
     let mut fuzz_seed: Option<u64> = None;
     let mut fuzz_artifacts: Option<PathBuf> = None;
+    let mut fuzz_json_path: Option<PathBuf> = None;
+    let mut fuzz_max_expr_depth: Option<usize> = None;
+    let mut fuzz_max_statements: Option<usize> = None;
+    let mut fuzz_shrink = true;
+    let mut fuzz_write_artifacts = true;
     let mut use_opt = false;
     let mut start_repl = false;
     let mut eval_expr: Option<String> = None;
@@ -106,6 +124,15 @@ fn main() {
             }
             "--trace-replay" => trace_replay = true,
             "--trace-diff" => trace_diff = true,
+            "--audit-json" => {
+                i += 1;
+                if i < args.len() {
+                    audit_json_path = Some(PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("Error: --audit-json requires an output file");
+                    process::exit(1);
+                }
+            }
             "--fuzz" => {
                 i += 1;
                 if i < args.len() {
@@ -133,6 +160,35 @@ fn main() {
                     process::exit(1);
                 }
             }
+            "--fuzz-json" => {
+                i += 1;
+                if i < args.len() {
+                    fuzz_json_path = Some(PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("Error: --fuzz-json requires an output file");
+                    process::exit(1);
+                }
+            }
+            "--fuzz-max-expr-depth" => {
+                i += 1;
+                if i < args.len() {
+                    fuzz_max_expr_depth = Some(parse_usize_arg("--fuzz-max-expr-depth", &args[i]));
+                } else {
+                    eprintln!("Error: --fuzz-max-expr-depth requires a positive integer");
+                    process::exit(1);
+                }
+            }
+            "--fuzz-max-statements" => {
+                i += 1;
+                if i < args.len() {
+                    fuzz_max_statements = Some(parse_usize_arg("--fuzz-max-statements", &args[i]));
+                } else {
+                    eprintln!("Error: --fuzz-max-statements requires a positive integer");
+                    process::exit(1);
+                }
+            }
+            "--fuzz-no-shrink" => fuzz_shrink = false,
+            "--fuzz-no-artifacts" => fuzz_write_artifacts = false,
             "--repl" => start_repl = true,
             "--eval" => {
                 i += 1;
@@ -158,17 +214,45 @@ fn main() {
     }
 
     if let Some(cases) = fuzz_cases {
+        if audit_json_path.is_some() {
+            eprintln!("Error: --audit-json requires --trace-replay or --trace-diff");
+            process::exit(1);
+        }
+
         let default_config = FuzzConfig::default();
+        let artifact_dir = if fuzz_write_artifacts {
+            fuzz_artifacts.or(default_config.artifact_dir)
+        } else {
+            None
+        };
         let report = run_fuzzer(FuzzConfig {
             seed: fuzz_seed.unwrap_or(default_config.seed),
             cases,
-            max_expr_depth: default_config.max_expr_depth,
-            max_statements: default_config.max_statements,
-            artifact_dir: fuzz_artifacts.or(default_config.artifact_dir),
-            shrink: true,
+            max_expr_depth: fuzz_max_expr_depth.unwrap_or(default_config.max_expr_depth),
+            max_statements: fuzz_max_statements.unwrap_or(default_config.max_statements),
+            artifact_dir,
+            shrink: fuzz_shrink,
         });
         println!("{}", report);
+        if let Some(path) = fuzz_json_path {
+            if let Err(e) = fs::write(&path, report.to_json()) {
+                eprintln!("Error writing fuzz JSON to {}: {}", path.display(), e);
+                process::exit(1);
+            }
+        }
         process::exit(if report.success { 0 } else { 1 });
+    }
+
+    if fuzz_json_path.is_some()
+        || fuzz_seed.is_some()
+        || fuzz_artifacts.is_some()
+        || fuzz_max_expr_depth.is_some()
+        || fuzz_max_statements.is_some()
+        || !fuzz_shrink
+        || !fuzz_write_artifacts
+    {
+        eprintln!("Error: fuzz tuning options require --fuzz <cases>");
+        process::exit(1);
     }
 
     // Handle REPL mode
@@ -298,13 +382,30 @@ fn main() {
     if trace_replay {
         let report = replay_vm_trace(&compiled);
         println!("{}", report);
+        if let Some(path) = audit_json_path.as_deref() {
+            if let Err(e) = fs::write(path, report.evidence_json()) {
+                eprintln!("Error writing audit JSON to {}: {}", path.display(), e);
+                process::exit(1);
+            }
+        }
         process::exit(if report.replayable { 0 } else { 1 });
     }
 
     if trace_diff {
         let report = diff_vm_gc_traces(&compiled);
         println!("{}", report);
+        if let Some(path) = audit_json_path.as_deref() {
+            if let Err(e) = fs::write(path, report.evidence_json()) {
+                eprintln!("Error writing audit JSON to {}: {}", path.display(), e);
+                process::exit(1);
+            }
+        }
         process::exit(if report.equivalent { 0 } else { 1 });
+    }
+
+    if audit_json_path.is_some() {
+        eprintln!("Error: --audit-json requires --trace-replay or --trace-diff");
+        process::exit(1);
     }
 
     // Execution
