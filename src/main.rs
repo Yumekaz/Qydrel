@@ -4,12 +4,14 @@
 
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::process;
 use std::time::Instant;
 
 use minilang::{
-    compare_backends, compiler::disassemble, diff_vm_gc_traces, replay_vm_trace, Compiler, GcVm,
-    JitCompiler, Lexer, Optimizer, Parser, Repl, SemanticAnalyzer, Verifier, Vm,
+    compare_backends, compiler::disassemble, diff_vm_gc_traces, replay_vm_trace, run_fuzzer,
+    Compiler, FuzzConfig, GcVm, JitCompiler, Lexer, Optimizer, Parser, Repl, SemanticAnalyzer,
+    Verifier, Vm,
 };
 
 fn print_usage() {
@@ -38,6 +40,12 @@ fn print_usage() {
     eprintln!("               Verify reference VM trace determinism");
     eprintln!("  --trace-diff");
     eprintln!("               Compare VM and GC VM instruction traces");
+    eprintln!("  --fuzz <cases>");
+    eprintln!("               Generate deterministic programs and run the self-audit pipeline");
+    eprintln!("  --fuzz-seed <n>");
+    eprintln!("               Seed for --fuzz (decimal or 0x-prefixed hex)");
+    eprintln!("  --fuzz-artifacts <dir>");
+    eprintln!("               Directory for minimized failing repro artifacts");
     eprintln!("  --repl       Start interactive REPL");
     eprintln!("  --eval <e>   Evaluate expression and exit");
     eprintln!("  --no-color   Disable color output (no-op, for compatibility)");
@@ -66,6 +74,9 @@ fn main() {
     let mut trace_json_path: Option<String> = None;
     let mut trace_replay = false;
     let mut trace_diff = false;
+    let mut fuzz_cases: Option<usize> = None;
+    let mut fuzz_seed: Option<u64> = None;
+    let mut fuzz_artifacts: Option<PathBuf> = None;
     let mut use_opt = false;
     let mut start_repl = false;
     let mut eval_expr: Option<String> = None;
@@ -95,6 +106,33 @@ fn main() {
             }
             "--trace-replay" => trace_replay = true,
             "--trace-diff" => trace_diff = true,
+            "--fuzz" => {
+                i += 1;
+                if i < args.len() {
+                    fuzz_cases = Some(parse_usize_arg("--fuzz", &args[i]));
+                } else {
+                    eprintln!("Error: --fuzz requires a case count");
+                    process::exit(1);
+                }
+            }
+            "--fuzz-seed" => {
+                i += 1;
+                if i < args.len() {
+                    fuzz_seed = Some(parse_u64_arg("--fuzz-seed", &args[i]));
+                } else {
+                    eprintln!("Error: --fuzz-seed requires a seed");
+                    process::exit(1);
+                }
+            }
+            "--fuzz-artifacts" => {
+                i += 1;
+                if i < args.len() {
+                    fuzz_artifacts = Some(PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("Error: --fuzz-artifacts requires a directory");
+                    process::exit(1);
+                }
+            }
             "--repl" => start_repl = true,
             "--eval" => {
                 i += 1;
@@ -117,6 +155,20 @@ fn main() {
             }
         }
         i += 1;
+    }
+
+    if let Some(cases) = fuzz_cases {
+        let default_config = FuzzConfig::default();
+        let report = run_fuzzer(FuzzConfig {
+            seed: fuzz_seed.unwrap_or(default_config.seed),
+            cases,
+            max_expr_depth: default_config.max_expr_depth,
+            max_statements: default_config.max_statements,
+            artifact_dir: fuzz_artifacts.or(default_config.artifact_dir),
+            shrink: true,
+        });
+        println!("{}", report);
+        process::exit(if report.success { 0 } else { 1 });
     }
 
     // Handle REPL mode
@@ -457,5 +509,31 @@ fn main() {
         }
 
         process::exit(result.return_value as i32);
+    }
+}
+
+fn parse_usize_arg(name: &str, value: &str) -> usize {
+    match value.parse::<usize>() {
+        Ok(parsed) if parsed > 0 => parsed,
+        _ => {
+            eprintln!("Error: {} expects a positive integer, got {}", name, value);
+            process::exit(1);
+        }
+    }
+}
+
+fn parse_u64_arg(name: &str, value: &str) -> u64 {
+    let parsed = if let Some(hex) = value.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16)
+    } else {
+        value.parse::<u64>()
+    };
+
+    match parsed {
+        Ok(seed) => seed,
+        Err(_) => {
+            eprintln!("Error: {} expects a decimal or 0x-prefixed seed", name);
+            process::exit(1);
+        }
     }
 }

@@ -44,6 +44,9 @@ Rust may fail during linking.
 # Find the first instruction-level divergence between VM and GC VM
 ./target/release/minilang examples/hello.lang --trace-diff
 
+# Generate 1,000 deterministic programs and audit every runtime path
+./target/release/minilang --fuzz 1000 --fuzz-seed 0x5eed
+
 # Benchmark mode
 ./target/release/minilang examples/fibonacci.lang --bench
 
@@ -65,6 +68,7 @@ src/
 ├── compiler.rs     # Bytecode compiler
 ├── optimizer.rs    # Bytecode optimization passes
 ├── audit.rs        # Trace replay and backend trace diff reports
+├── fuzz.rs         # Deterministic self-audit fuzzer and shrinker
 ├── vm.rs           # Stack-based VM interpreter
 ├── gc_vm.rs        # GC-integrated VM
 ├── jit.rs          # x86-64 JIT compiler
@@ -142,6 +146,13 @@ Replay-oriented JSON trace support:
 Trace-level determinism and divergence reports:
 - `--trace-replay` reruns the reference VM and checks that the generated trace is replayable
 - `--trace-diff` compares standard VM and GC VM traces and reports the first differing instruction field
+
+### Self-Audit Fuzzer (`src/fuzz.rs`)
+
+Deterministic generated-program testing:
+- `--fuzz <cases>` generates valid, terminating scalar MiniLang programs from a seed
+- Every case runs compile, verification, backend comparison, trace replay, and VM/GC trace diff
+- On first failure, the fuzzer shrinks the repro and writes source, bytecode, traces, and failure metadata under `fuzz-artifacts/`
 
 ## Benchmarking
 

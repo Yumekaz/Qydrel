@@ -21,6 +21,7 @@ pub mod ast;
 pub mod audit;
 pub mod compare;
 pub mod compiler;
+pub mod fuzz;
 pub mod gc;
 pub mod gc_vm;
 pub mod jit;
@@ -46,6 +47,7 @@ pub use compare::{
     compare_backends, BackendComparisonReport, BackendOutcome, BackendRun, BackendRunStatus,
 };
 pub use compiler::{CompiledProgram, Compiler, Opcode};
+pub use fuzz::{run_fuzzer, FuzzConfig, FuzzFailure, FuzzFailureReason, FuzzReport};
 pub use gc::{GarbageCollector, GcStats, TypeTag};
 pub use gc_vm::{GcValue, GcVm, GcVmResult, HeapArray};
 pub use jit::{ExecutableMemory, JitCompiler, MachineCode, Reg};
