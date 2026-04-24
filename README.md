@@ -35,8 +35,14 @@ Rust may fail during linking.
 # Compare observable behavior across VM backends
 ./target/release/minilang examples/fibonacci.lang --compare-backends
 
-# Write a replay-oriented JSON trace from the reference VM
+# Write a replay-oriented JSON trace from the selected VM backend
 ./target/release/minilang examples/hello.lang --trace-json trace.json
+
+# Check that the reference VM trace replays deterministically
+./target/release/minilang examples/hello.lang --trace-replay
+
+# Find the first instruction-level divergence between VM and GC VM
+./target/release/minilang examples/hello.lang --trace-diff
 
 # Benchmark mode
 ./target/release/minilang examples/fibonacci.lang --bench
@@ -58,6 +64,7 @@ src/
 ├── sema.rs         # Semantic analyzer (type checking)
 ├── compiler.rs     # Bytecode compiler
 ├── optimizer.rs    # Bytecode optimization passes
+├── audit.rs        # Trace replay and backend trace diff reports
 ├── vm.rs           # Stack-based VM interpreter
 ├── gc_vm.rs        # GC-integrated VM
 ├── jit.rs          # x86-64 JIT compiler
@@ -127,8 +134,14 @@ Self-auditing runtime comparison:
 ### Execution Trace (`src/trace.rs`)
 
 Replay-oriented JSON trace support:
-- Records reference VM instruction events with PC, opcode, args, stack before/after, frame depth, next PC, and outcome
-- Powers `--trace-json <file>` as the data layer for future trace replay and diff tooling
+- Records VM and GC VM instruction events with PC, opcode, args, stack before/after, frame depth, next PC, and outcome
+- Powers `--trace-json <file>` as the portable artifact format
+
+### Runtime Audit (`src/audit.rs`)
+
+Trace-level determinism and divergence reports:
+- `--trace-replay` reruns the reference VM and checks that the generated trace is replayable
+- `--trace-diff` compares standard VM and GC VM traces and reports the first differing instruction field
 
 ## Benchmarking
 

@@ -8,8 +8,8 @@ use std::process;
 use std::time::Instant;
 
 use minilang::{
-    compare_backends, compiler::disassemble, Compiler, GcVm, JitCompiler, Lexer, Optimizer, Parser,
-    Repl, SemanticAnalyzer, Verifier, Vm,
+    compare_backends, compiler::disassemble, diff_vm_gc_traces, replay_vm_trace, Compiler, GcVm,
+    JitCompiler, Lexer, Optimizer, Parser, Repl, SemanticAnalyzer, Verifier, Vm,
 };
 
 fn print_usage() {
@@ -34,6 +34,10 @@ fn print_usage() {
     eprintln!("  --stats      Show allocator/GC/optimizer statistics");
     eprintln!("  --trace-json <file>");
     eprintln!("               Write reference VM execution trace as JSON");
+    eprintln!("  --trace-replay");
+    eprintln!("               Verify reference VM trace determinism");
+    eprintln!("  --trace-diff");
+    eprintln!("               Compare VM and GC VM instruction traces");
     eprintln!("  --repl       Start interactive REPL");
     eprintln!("  --eval <e>   Evaluate expression and exit");
     eprintln!("  --no-color   Disable color output (no-op, for compatibility)");
@@ -60,6 +64,8 @@ fn main() {
     let mut bench = false;
     let mut show_stats = false;
     let mut trace_json_path: Option<String> = None;
+    let mut trace_replay = false;
+    let mut trace_diff = false;
     let mut use_opt = false;
     let mut start_repl = false;
     let mut eval_expr: Option<String> = None;
@@ -87,6 +93,8 @@ fn main() {
                     process::exit(1);
                 }
             }
+            "--trace-replay" => trace_replay = true,
+            "--trace-diff" => trace_diff = true,
             "--repl" => start_repl = true,
             "--eval" => {
                 i += 1;
@@ -235,11 +243,23 @@ fn main() {
         process::exit(if report.equivalent { 0 } else { 1 });
     }
 
+    if trace_replay {
+        let report = replay_vm_trace(&compiled);
+        println!("{}", report);
+        process::exit(if report.replayable { 0 } else { 1 });
+    }
+
+    if trace_diff {
+        let report = diff_vm_gc_traces(&compiled);
+        println!("{}", report);
+        process::exit(if report.equivalent { 0 } else { 1 });
+    }
+
     // Execution
     let exec_start = Instant::now();
 
-    if trace_json_path.is_some() && (use_gc || use_jit) {
-        eprintln!("Error: --trace-json currently supports the standard VM backend only");
+    if trace_json_path.is_some() && use_jit {
+        eprintln!("Error: --trace-json does not support the JIT backend");
         process::exit(1);
     }
 
@@ -299,8 +319,18 @@ fn main() {
     if use_gc {
         // GC-integrated VM (heap-allocated arrays)
         let mut vm = GcVm::new(&compiled).with_debug(debug);
+        if trace_json_path.is_some() {
+            vm = vm.with_trace();
+        }
         let result = vm.run();
         let exec_time = exec_start.elapsed();
+
+        if let Some(path) = trace_json_path.as_deref() {
+            if let Err(e) = fs::write(path, vm.trace_json()) {
+                eprintln!("Error writing trace JSON to {}: {}", path, e);
+                process::exit(1);
+            }
+        }
 
         if !result.success {
             eprintln!(

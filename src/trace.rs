@@ -4,6 +4,8 @@
 //! format small and explicit makes it suitable for later replay and diff tools.
 
 use crate::vm::TrapCode;
+use std::cmp::Ordering;
+use std::fmt;
 use std::fmt::Write;
 
 /// One VM instruction execution event.
@@ -31,6 +33,54 @@ pub enum TraceOutcome {
     Trap { code: TrapCode, message: String },
 }
 
+/// First observable mismatch between two traces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceDivergence {
+    pub event_index: usize,
+    pub field: String,
+    pub left: String,
+    pub right: String,
+}
+
+impl TraceDivergence {
+    fn new(event_index: usize, field: &str, left: String, right: String) -> Self {
+        Self {
+            event_index,
+            field: field.to_string(),
+            left,
+            right,
+        }
+    }
+}
+
+/// Return the first differing field between two instruction traces.
+pub fn first_trace_divergence(
+    left: &[TraceEvent],
+    right: &[TraceEvent],
+) -> Option<TraceDivergence> {
+    for (index, (left_event, right_event)) in left.iter().zip(right).enumerate() {
+        if let Some(divergence) = compare_event(index, left_event, right_event) {
+            return Some(divergence);
+        }
+    }
+
+    match left.len().cmp(&right.len()) {
+        Ordering::Equal => None,
+        Ordering::Less => Some(TraceDivergence::new(
+            left.len(),
+            "length",
+            "<end>".to_string(),
+            summarize_event(&right[left.len()]),
+        )),
+        Ordering::Greater => Some(TraceDivergence::new(
+            right.len(),
+            "length",
+            summarize_event(&left[right.len()]),
+            "<end>".to_string(),
+        )),
+    }
+}
+
 /// Serialize trace events as a stable JSON object.
 pub fn events_to_json(backend: &str, events: &[TraceEvent]) -> String {
     let mut out = String::new();
@@ -48,6 +98,66 @@ pub fn events_to_json(backend: &str, events: &[TraceEvent]) -> String {
 
     out.push_str("\n  ]\n}");
     out
+}
+
+fn compare_event(index: usize, left: &TraceEvent, right: &TraceEvent) -> Option<TraceDivergence> {
+    field_divergence(index, "cycle", &left.cycle, &right.cycle)
+        .or_else(|| field_divergence(index, "pc", &left.pc, &right.pc))
+        .or_else(|| field_divergence(index, "opcode", &left.opcode, &right.opcode))
+        .or_else(|| field_divergence(index, "arg1", &left.arg1, &right.arg1))
+        .or_else(|| field_divergence(index, "arg2", &left.arg2, &right.arg2))
+        .or_else(|| {
+            field_divergence(
+                index,
+                "stack_before",
+                &left.stack_before,
+                &right.stack_before,
+            )
+        })
+        .or_else(|| field_divergence(index, "stack_after", &left.stack_after, &right.stack_after))
+        .or_else(|| {
+            field_divergence(
+                index,
+                "frame_depth_before",
+                &left.frame_depth_before,
+                &right.frame_depth_before,
+            )
+        })
+        .or_else(|| {
+            field_divergence(
+                index,
+                "frame_depth_after",
+                &left.frame_depth_after,
+                &right.frame_depth_after,
+            )
+        })
+        .or_else(|| field_divergence(index, "next_pc", &left.next_pc, &right.next_pc))
+        .or_else(|| field_divergence(index, "outcome", &left.outcome, &right.outcome))
+}
+
+fn field_divergence<T: fmt::Debug + PartialEq>(
+    index: usize,
+    field: &str,
+    left: &T,
+    right: &T,
+) -> Option<TraceDivergence> {
+    if left == right {
+        None
+    } else {
+        Some(TraceDivergence::new(
+            index,
+            field,
+            format!("{:?}", left),
+            format!("{:?}", right),
+        ))
+    }
+}
+
+fn summarize_event(event: &TraceEvent) -> String {
+    format!(
+        "pc={} opcode={} stack_after={:?} outcome={:?}",
+        event.pc, event.opcode, event.stack_after, event.outcome
+    )
 }
 
 fn push_event_json(out: &mut String, event: &TraceEvent) {
@@ -118,16 +228,25 @@ fn push_json_string(out: &mut String, value: &str) {
     out.push('"');
 }
 
+impl fmt::Display for TraceDivergence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "event #{} field {} differs: {} vs {}",
+            self.event_index, self.field, self.left, self.right
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn escapes_json_strings() {
-        let event = TraceEvent {
+    fn sample_event() -> TraceEvent {
+        TraceEvent {
             cycle: 1,
             pc: 0,
-            opcode: "LoadConst\"x".to_string(),
+            opcode: "LoadConst".to_string(),
             arg1: 42,
             arg2: 0,
             stack_before: vec![],
@@ -136,9 +255,35 @@ mod tests {
             frame_depth_after: 1,
             next_pc: 1,
             outcome: TraceOutcome::Continue,
-        };
+        }
+    }
+
+    #[test]
+    fn escapes_json_strings() {
+        let mut event = sample_event();
+        event.opcode = "LoadConst\"x".to_string();
 
         let json = events_to_json("VM", &[event]);
         assert!(json.contains("LoadConst\\\"x"));
+    }
+
+    #[test]
+    fn detects_first_field_divergence() {
+        let left = sample_event();
+        let mut right = sample_event();
+        right.stack_after = vec![43];
+
+        let divergence = first_trace_divergence(&[left], &[right]).unwrap();
+        assert_eq!(divergence.event_index, 0);
+        assert_eq!(divergence.field, "stack_after");
+    }
+
+    #[test]
+    fn detects_trace_length_divergence() {
+        let event = sample_event();
+        let divergence = first_trace_divergence(&[], &[event]).unwrap();
+
+        assert_eq!(divergence.event_index, 0);
+        assert_eq!(divergence.field, "length");
     }
 }

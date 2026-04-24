@@ -9,6 +9,7 @@
 use crate::alloc::BumpAllocator;
 use crate::compiler::{CompiledProgram, GlobalInfo, Opcode};
 use crate::limits;
+use crate::trace::{events_to_json, TraceEvent, TraceOutcome};
 use crate::vm::TrapCode;
 
 /// A value that can be either immediate or a heap reference
@@ -153,6 +154,17 @@ pub struct GcVm<'a> {
     gc_threshold: usize,
     /// Allocator for bump allocations
     allocator: BumpAllocator,
+    /// Optional execution trace
+    trace: Option<Vec<TraceEvent>>,
+}
+
+struct GcTraceStep {
+    pc: usize,
+    opcode: Opcode,
+    arg1: i32,
+    arg2: i32,
+    stack_before: Option<Vec<i64>>,
+    frame_depth_before: usize,
 }
 
 impl<'a> GcVm<'a> {
@@ -182,6 +194,7 @@ impl<'a> GcVm<'a> {
             gc_objects_freed: 0,
             gc_threshold: Self::GC_THRESHOLD,
             allocator: BumpAllocator::new(1024 * 1024),
+            trace: None,
         }
     }
 
@@ -193,6 +206,25 @@ impl<'a> GcVm<'a> {
     pub fn with_max_cycles(mut self, max: u64) -> Self {
         self.max_cycles = max;
         self
+    }
+
+    /// Enable execution tracing.
+    pub fn with_trace(mut self) -> Self {
+        self.trace = Some(Vec::new());
+        self
+    }
+
+    /// Get recorded trace events.
+    pub fn trace_events(&self) -> &[TraceEvent] {
+        match &self.trace {
+            Some(events) => events,
+            None => &[],
+        }
+    }
+
+    /// Serialize recorded trace events to JSON.
+    pub fn trace_json(&self) -> String {
+        events_to_json("GC VM", self.trace_events())
     }
 
     /// Allocate a heap array
@@ -404,6 +436,17 @@ impl<'a> GcVm<'a> {
             }
 
             let instr = &self.program.instructions[self.pc];
+            let trace_step = GcTraceStep {
+                pc: self.pc,
+                opcode: instr.opcode,
+                arg1: instr.arg1,
+                arg2: instr.arg2,
+                stack_before: self.trace.as_ref().map(|_| self.stack_as_i64()),
+                frame_depth_before: self.call_stack.len(),
+            };
+            let opcode = trace_step.opcode;
+            let arg1 = trace_step.arg1;
+            let arg2 = trace_step.arg2;
             self.cycles += 1;
 
             if self.debug {
@@ -413,24 +456,34 @@ impl<'a> GcVm<'a> {
                     "[cycle={} pc={}] EXEC {:?} {} {} | stack=[{}]",
                     self.cycles,
                     self.pc,
-                    instr.opcode,
-                    instr.arg1,
-                    instr.arg2,
+                    opcode,
+                    arg1,
+                    arg2,
                     stack_str.join(", ")
                 );
             }
 
             // Execute
-            match self.execute_instruction(instr.opcode, instr.arg1, instr.arg2) {
+            let mut outcome = TraceOutcome::Continue;
+            match self.execute_instruction(opcode, arg1, arg2) {
                 Ok(true) => self.pc += 1,
-                Ok(false) => {}
+                Ok(false) => outcome = TraceOutcome::Jump,
                 Err((trap_code, msg)) => {
+                    self.record_trace(
+                        trace_step,
+                        TraceOutcome::Trap {
+                            code: trap_code,
+                            message: msg.clone(),
+                        },
+                    );
                     return self.make_trap_result(trap_code, msg);
                 }
             }
 
             // Check for exit
             if self.call_stack.is_empty() {
+                self.record_trace(trace_step, TraceOutcome::Exit);
+
                 let return_value = self.stack.pop().map(|v| v.to_i64()).unwrap_or(0);
                 return GcVmResult {
                     success: true,
@@ -447,7 +500,35 @@ impl<'a> GcVm<'a> {
                     heap_arrays_allocated: self.next_array_id as usize,
                 };
             }
+
+            self.record_trace(trace_step, outcome);
         }
+    }
+
+    fn record_trace(&mut self, step: GcTraceStep, outcome: TraceOutcome) {
+        let stack_after = self.stack_as_i64();
+        let frame_depth_after = self.call_stack.len();
+        let Some(events) = self.trace.as_mut() else {
+            return;
+        };
+
+        events.push(TraceEvent {
+            cycle: self.cycles,
+            pc: step.pc,
+            opcode: format!("{:?}", step.opcode),
+            arg1: step.arg1,
+            arg2: step.arg2,
+            stack_before: step.stack_before.unwrap_or_default(),
+            stack_after,
+            frame_depth_before: step.frame_depth_before,
+            frame_depth_after,
+            next_pc: self.pc,
+            outcome,
+        });
+    }
+
+    fn stack_as_i64(&self) -> Vec<i64> {
+        self.stack.iter().map(GcValue::to_i64).collect()
     }
 
     fn execute_instruction(

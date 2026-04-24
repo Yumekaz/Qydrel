@@ -18,6 +18,7 @@
 pub mod alloc;
 pub mod arena_ast;
 pub mod ast;
+pub mod audit;
 pub mod compare;
 pub mod compiler;
 pub mod gc;
@@ -38,6 +39,9 @@ pub mod vm;
 pub use alloc::{AllocatorStats, BumpAllocator, FreeListAllocator, SlabAllocator};
 pub use arena_ast::{ArenaExpr, ArenaStmt, ArenaStr, ArenaVec, AstArena};
 pub use ast::{BinaryOp, Expr, Function, Program, Stmt, Type, UnaryOp};
+pub use audit::{
+    diff_vm_gc_traces, replay_vm_trace, BackendTraceDiffReport, ExecutionSummary, TraceReplayReport,
+};
 pub use compare::{
     compare_backends, BackendComparisonReport, BackendOutcome, BackendRun, BackendRunStatus,
 };
@@ -52,7 +56,9 @@ pub use repl::Repl;
 pub use runtime::{GcArray, GlobalStore, LocalFrame, Value, ValueStack};
 pub use sema::SemanticAnalyzer;
 pub use token::{Span, Token, TokenKind};
-pub use trace::{events_to_json, TraceEvent, TraceOutcome};
+pub use trace::{
+    events_to_json, first_trace_divergence, TraceDivergence, TraceEvent, TraceOutcome,
+};
 pub use verifier::{
     BackendEligibility, BackendStatus, FunctionVerification, VerificationError, VerificationReport,
     Verifier,
