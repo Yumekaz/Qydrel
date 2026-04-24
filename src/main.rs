@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use minilang::{
     compiler::disassemble, Compiler, GcVm, JitCompiler, Lexer, Optimizer, Parser, Repl,
-    SemanticAnalyzer, Vm,
+    SemanticAnalyzer, Verifier, Vm,
 };
 
 fn print_usage() {
@@ -21,6 +21,7 @@ fn print_usage() {
     eprintln!("  --tokens     Print tokens and exit");
     eprintln!("  --ast        Print AST and exit");
     eprintln!("  --ir         Print bytecode IR");
+    eprintln!("  --verify     Verify bytecode safety and backend eligibility");
     eprintln!("  --opt        Enable optimizations");
     eprintln!("  --gc         Use GC-integrated VM (heap arrays)");
     eprintln!("  --jit        Use JIT compiler (linear expressions only, Linux x86-64)");
@@ -45,6 +46,7 @@ fn main() {
     let mut show_tokens = false;
     let mut show_ast = false;
     let mut show_ir = false;
+    let mut verify = false;
     let mut use_jit = false;
     let mut use_gc = false;
     let mut debug = false;
@@ -60,6 +62,7 @@ fn main() {
             "--tokens" => show_tokens = true,
             "--ast" => show_ast = true,
             "--ir" => show_ir = true,
+            "--verify" => verify = true,
             "--opt" => use_opt = true,
             "--gc" => use_gc = true,
             "--jit" => use_jit = true,
@@ -200,6 +203,12 @@ fn main() {
             println!("{}", optimizer.stats());
         }
         return;
+    }
+
+    if verify {
+        let report = Verifier::new().verify(&compiled);
+        println!("{}", report);
+        process::exit(if report.valid { 0 } else { 1 });
     }
 
     // Execution

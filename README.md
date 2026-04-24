@@ -29,6 +29,9 @@ Rust may fail during linking.
 # Show bytecode IR
 ./target/release/minilang examples/fibonacci.lang --ir
 
+# Verify bytecode safety and backend eligibility
+./target/release/minilang examples/fibonacci.lang --verify
+
 # Benchmark mode
 ./target/release/minilang examples/fibonacci.lang --bench
 
@@ -100,6 +103,13 @@ Stack-based interpreter:
 - 30+ bytecode instructions
 - Call stack with frames
 - Runtime error trapping
+
+### Bytecode Verifier (`src/verifier.rs`)
+
+Structural verifier for compiled bytecode:
+- Checks stack effects, jump targets, local/global slot bounds, function call arity, and array metadata
+- Reports maximum stack depth, estimated frame depth, possible runtime traps, and backend eligibility
+- Powers the `--verify` CLI mode as the foundation for backend equivalence and trace tooling
 
 ## Benchmarking
 

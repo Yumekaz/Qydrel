@@ -30,6 +30,7 @@ pub mod repl;
 pub mod runtime;
 pub mod sema;
 pub mod token;
+pub mod verifier;
 pub mod vm;
 
 pub use alloc::{AllocatorStats, BumpAllocator, FreeListAllocator, SlabAllocator};
@@ -46,6 +47,10 @@ pub use repl::Repl;
 pub use runtime::{GcArray, GlobalStore, LocalFrame, Value, ValueStack};
 pub use sema::SemanticAnalyzer;
 pub use token::{Span, Token, TokenKind};
+pub use verifier::{
+    BackendEligibility, BackendStatus, FunctionVerification, VerificationError, VerificationReport,
+    Verifier,
+};
 pub use vm::{TrapCode, Vm, VmResult};
 
 /// Compile and run a MiniLang program
