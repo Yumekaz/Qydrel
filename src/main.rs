@@ -32,6 +32,8 @@ fn print_usage() {
     eprintln!("  --debug      Enable debug output");
     eprintln!("  --bench      Run with timing information");
     eprintln!("  --stats      Show allocator/GC/optimizer statistics");
+    eprintln!("  --trace-json <file>");
+    eprintln!("               Write reference VM execution trace as JSON");
     eprintln!("  --repl       Start interactive REPL");
     eprintln!("  --eval <e>   Evaluate expression and exit");
     eprintln!("  --no-color   Disable color output (no-op, for compatibility)");
@@ -57,6 +59,7 @@ fn main() {
     let mut debug = false;
     let mut bench = false;
     let mut show_stats = false;
+    let mut trace_json_path: Option<String> = None;
     let mut use_opt = false;
     let mut start_repl = false;
     let mut eval_expr: Option<String> = None;
@@ -75,6 +78,15 @@ fn main() {
             "--debug" => debug = true,
             "--bench" => bench = true,
             "--stats" => show_stats = true,
+            "--trace-json" => {
+                i += 1;
+                if i < args.len() {
+                    trace_json_path = Some(args[i].clone());
+                } else {
+                    eprintln!("Error: --trace-json requires an output file");
+                    process::exit(1);
+                }
+            }
             "--repl" => start_repl = true,
             "--eval" => {
                 i += 1;
@@ -226,6 +238,11 @@ fn main() {
     // Execution
     let exec_start = Instant::now();
 
+    if trace_json_path.is_some() && (use_gc || use_jit) {
+        eprintln!("Error: --trace-json currently supports the standard VM backend only");
+        process::exit(1);
+    }
+
     if use_jit {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
@@ -342,8 +359,18 @@ fn main() {
     } else {
         // Standard interpreter
         let mut vm = Vm::new(&compiled).with_debug(debug);
+        if trace_json_path.is_some() {
+            vm = vm.with_trace();
+        }
         let result = vm.run();
         let exec_time = exec_start.elapsed();
+
+        if let Some(path) = trace_json_path.as_deref() {
+            if let Err(e) = fs::write(path, vm.trace_json()) {
+                eprintln!("Error writing trace JSON to {}: {}", path, e);
+                process::exit(1);
+            }
+        }
 
         if !result.success {
             // Trap message format matching Python spec exactly:

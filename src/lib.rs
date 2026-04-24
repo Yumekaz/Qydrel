@@ -31,6 +31,7 @@ pub mod repl;
 pub mod runtime;
 pub mod sema;
 pub mod token;
+pub mod trace;
 pub mod verifier;
 pub mod vm;
 
@@ -51,6 +52,7 @@ pub use repl::Repl;
 pub use runtime::{GcArray, GlobalStore, LocalFrame, Value, ValueStack};
 pub use sema::SemanticAnalyzer;
 pub use token::{Span, Token, TokenKind};
+pub use trace::{events_to_json, TraceEvent, TraceOutcome};
 pub use verifier::{
     BackendEligibility, BackendStatus, FunctionVerification, VerificationError, VerificationReport,
     Verifier,

@@ -7,6 +7,7 @@ use crate::alloc::BumpAllocator;
 use crate::compiler::{CompiledProgram, GlobalInfo, Opcode};
 use crate::gc::GarbageCollector;
 use crate::limits;
+use crate::trace::{events_to_json, TraceEvent, TraceOutcome};
 
 /// Trap codes for runtime errors (matching Python spec exactly)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +73,8 @@ pub struct Vm<'a> {
     allocator: BumpAllocator,
     /// Garbage collector
     gc: GarbageCollector,
+    /// Optional execution trace
+    trace: Option<Vec<TraceEvent>>,
 }
 
 /// VM limits matching Python spec
@@ -98,6 +101,7 @@ impl<'a> Vm<'a> {
             debug: false,
             allocator: BumpAllocator::new(1024 * 1024), // 1MB
             gc: GarbageCollector::new(512 * 1024),      // 512KB threshold
+            trace: None,
         }
     }
 
@@ -111,6 +115,25 @@ impl<'a> Vm<'a> {
     pub fn with_max_cycles(mut self, max: u64) -> Self {
         self.max_cycles = max;
         self
+    }
+
+    /// Enable execution tracing.
+    pub fn with_trace(mut self) -> Self {
+        self.trace = Some(Vec::new());
+        self
+    }
+
+    /// Get recorded trace events.
+    pub fn trace_events(&self) -> &[TraceEvent] {
+        match &self.trace {
+            Some(events) => events,
+            None => &[],
+        }
+    }
+
+    /// Serialize recorded trace events to JSON.
+    pub fn trace_json(&self) -> String {
+        events_to_json("VM", self.trace_events())
     }
 
     /// Create a trap result with proper formatting
@@ -182,8 +205,15 @@ impl<'a> Vm<'a> {
                 );
             }
 
+            let pc_before = self.pc;
+            let frame_depth_before = self.call_stack.len();
+            let trace_stack_before = self.trace.as_ref().map(|_| self.stack.clone());
+
             // Fetch instruction (bounds check eliminated in release)
             let instr = unsafe { self.program.instructions.get_unchecked(self.pc) };
+            let opcode = instr.opcode;
+            let arg1 = instr.arg1;
+            let arg2 = instr.arg2;
             self.cycles += 1;
 
             if self.debug {
@@ -192,29 +222,53 @@ impl<'a> Vm<'a> {
                     "[cycle={} pc={}] EXEC {:?} {} {} | stack=[{}]",
                     self.cycles,
                     self.pc,
-                    instr.opcode,
-                    instr.arg1,
-                    instr.arg2,
+                    opcode,
+                    arg1,
+                    arg2,
                     stack_before.join(", ")
                 );
             }
 
             // Execute
-            match self.execute_instruction(instr.opcode, instr.arg1, instr.arg2) {
+            let mut outcome = TraceOutcome::Continue;
+            match self.execute_instruction(opcode, arg1, arg2) {
                 Ok(true) => {
                     // Normal execution, continue
                     self.pc += 1;
                 }
                 Ok(false) => {
                     // Instruction handled PC change
+                    outcome = TraceOutcome::Jump;
                 }
                 Err((trap_code, msg)) => {
+                    self.record_trace(
+                        pc_before,
+                        opcode,
+                        arg1,
+                        arg2,
+                        trace_stack_before,
+                        frame_depth_before,
+                        TraceOutcome::Trap {
+                            code: trap_code,
+                            message: msg.clone(),
+                        },
+                    );
                     return self.make_trap_result(trap_code, msg);
                 }
             }
 
             // Check for exit
             if self.call_stack.is_empty() {
+                self.record_trace(
+                    pc_before,
+                    opcode,
+                    arg1,
+                    arg2,
+                    trace_stack_before,
+                    frame_depth_before,
+                    TraceOutcome::Exit,
+                );
+
                 let return_value = self.stack.pop().unwrap_or(0);
                 return VmResult {
                     success: true,
@@ -228,7 +282,46 @@ impl<'a> Vm<'a> {
                     frame_depth: self.call_stack.len(),
                 };
             }
+
+            self.record_trace(
+                pc_before,
+                opcode,
+                arg1,
+                arg2,
+                trace_stack_before,
+                frame_depth_before,
+                outcome,
+            );
         }
+    }
+
+    fn record_trace(
+        &mut self,
+        pc: usize,
+        opcode: Opcode,
+        arg1: i32,
+        arg2: i32,
+        stack_before: Option<Vec<i64>>,
+        frame_depth_before: usize,
+        outcome: TraceOutcome,
+    ) {
+        let Some(events) = self.trace.as_mut() else {
+            return;
+        };
+
+        events.push(TraceEvent {
+            cycle: self.cycles,
+            pc,
+            opcode: format!("{:?}", opcode),
+            arg1,
+            arg2,
+            stack_before: stack_before.unwrap_or_default(),
+            stack_after: self.stack.clone(),
+            frame_depth_before,
+            frame_depth_after: self.call_stack.len(),
+            next_pc: self.pc,
+            outcome,
+        });
     }
 
     fn validate_program(&self) -> Result<(), (TrapCode, String)> {
@@ -955,6 +1048,24 @@ mod tests {
         let result = compile_and_run("func main() { return 42; }");
         assert!(result.success);
         assert_eq!(result.return_value, 42);
+    }
+
+    #[test]
+    fn test_trace_records_instruction_events() {
+        let mut lexer = Lexer::new("func main() { return 42; }");
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse().unwrap();
+        let mut analyzer = SemanticAnalyzer::new();
+        analyzer.analyze(&program).unwrap();
+        let (compiled, _) = Compiler::new().compile(&program);
+
+        let mut vm = Vm::new(&compiled).with_trace();
+        let result = vm.run();
+
+        assert!(result.success);
+        assert!(!vm.trace_events().is_empty());
+        assert!(vm.trace_json().contains("\"backend\": \"VM\""));
     }
 
     #[test]

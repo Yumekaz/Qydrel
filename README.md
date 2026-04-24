@@ -35,6 +35,9 @@ Rust may fail during linking.
 # Compare observable behavior across VM backends
 ./target/release/minilang examples/fibonacci.lang --compare-backends
 
+# Write a replay-oriented JSON trace from the reference VM
+./target/release/minilang examples/hello.lang --trace-json trace.json
+
 # Benchmark mode
 ./target/release/minilang examples/fibonacci.lang --bench
 
@@ -120,6 +123,12 @@ Self-auditing runtime comparison:
 - Runs the same bytecode through the standard VM, GC VM, optimized VM, and JIT when eligible
 - Compares observable behavior: success/trap status, return value, trap code, and output
 - Powers the `--compare-backends` CLI mode for equivalence checks
+
+### Execution Trace (`src/trace.rs`)
+
+Replay-oriented JSON trace support:
+- Records reference VM instruction events with PC, opcode, args, stack before/after, frame depth, next PC, and outcome
+- Powers `--trace-json <file>` as the data layer for future trace replay and diff tooling
 
 ## Benchmarking
 
