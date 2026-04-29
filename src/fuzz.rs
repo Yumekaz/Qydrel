@@ -1129,6 +1129,7 @@ fn feature_names(features: &FeatureSet) -> Vec<&'static str> {
     names
 }
 
+#[cfg(test)]
 fn metamorphic_variants(source: &str) -> Vec<String> {
     metamorphic_variants_with_families(source)
         .into_iter()
