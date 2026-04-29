@@ -115,6 +115,7 @@ impl BackendOutcome {
         }
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn from_jit_return(return_value: i64) -> Self {
         Self {
             success: true,

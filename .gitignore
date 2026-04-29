@@ -1,2 +1,4 @@
 target/
 fuzz-artifacts/
+evidence/
+.playwright-mcp/

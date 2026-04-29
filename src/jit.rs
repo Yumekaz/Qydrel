@@ -461,6 +461,7 @@ impl Default for MachineCode {
 /// Executable memory region
 pub struct ExecutableMemory {
     ptr: *mut u8,
+    #[cfg(target_os = "linux")]
     size: usize,
 }
 

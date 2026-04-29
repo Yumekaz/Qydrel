@@ -1001,6 +1001,7 @@ fn write_backend(
     }
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn jit_supports_opcode(opcode: Opcode) -> bool {
     matches!(
         opcode,

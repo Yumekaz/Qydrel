@@ -8,10 +8,12 @@ use std::path::PathBuf;
 use std::process;
 use std::time::Instant;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use minilang::JitCompiler;
 use minilang::{
     compare_ast_oracle, compare_backends, compiler::disassemble, diff_vm_gc_traces,
     generate_evidence_report, replay_vm_trace, run_fuzzer, Compiler, EvidenceConfig, FuzzConfig,
-    FuzzMode, GcVm, JitCompiler, Lexer, Optimizer, Parser, Repl, SemanticAnalyzer, Verifier, Vm,
+    FuzzMode, GcVm, Lexer, Optimizer, Parser, Repl, SemanticAnalyzer, Verifier, Vm,
 };
 
 fn print_usage() {
