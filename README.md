@@ -6,6 +6,12 @@ source-level oracle execution, bytecode verification, backend equivalence,
 replayable traces, VM/GC trace diffs, metamorphic fuzzing, shrinking, and
 evidence reports.
 
+The interesting part is the audit loop. A program is not only compiled and run;
+it can be checked against an independent AST interpreter, replayed through
+instruction traces, compared across multiple runtime backends, mutated through
+metamorphic variants, minimized when it fails, and summarized as reviewer-facing
+evidence.
+
 Current surface:
 - **Frontend pipeline**: lexer, parser, semantic analyzer, bytecode compiler
 - **AST oracle**: independent source interpreter compared against executable backends
@@ -19,6 +25,39 @@ Current surface:
 
 This is intentionally not a production language. The language stays small so
 compiler/runtime invariants can be checked directly.
+
+## Reviewer Entry Points
+
+- [Architecture diagram](docs/architecture.md): one-page map of the compiler,
+  runtime backends, oracle, fuzzing, corpus, and evidence loop.
+- [Correctness lab guide](docs/correctness-lab.md): what each audit command
+  proves and where the boundaries are.
+- [Evidence report snapshot](docs/evidence-report.md): current corpus, fuzz,
+  backend, trace, opcode coverage, and bug-museum evidence.
+- [Bug museum](docs/bug-museum.md): checked-in minimized historical bug repros.
+- [Demo script](docs/demo-script.md): short command sequence for a live review.
+
+## Try It In Three Minutes
+
+```bash
+cargo test --locked --all-targets --all-features
+cargo run --locked --release -- examples/fibonacci.lang --oracle
+cargo run --locked --release -- --evidence-report evidence/latest --evidence-fuzz 5
+```
+
+On Windows/MSVC, run those commands from a Visual Studio Developer Command
+Prompt if `link.exe` resolution is broken.
+
+## What This Claims
+
+Qydrel is a serious compiler/runtime correctness lab for a small language. It
+does claim executable evidence for verifier rules, AST-oracle agreement,
+backend equivalence, trace replay, VM/GC trace normalization, deterministic
+fuzzing, metamorphic testing, shrinking, and regression corpus checks.
+
+It does not claim production language completeness, industrial JIT performance,
+or a formal proof of all behaviors. The project is deliberately narrow so the
+correctness machinery can be inspected instead of hand-waved.
 
 ## Building
 
