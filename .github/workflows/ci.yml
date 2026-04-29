@@ -40,7 +40,20 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Lint
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee cargo-clippy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          text = "\n".join(Path("cargo-clippy.log").read_text(errors="replace").splitlines()[-120:])
+          text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print(f"::error title=Linux cargo clippy failed::{text}")
+          PY
+            exit "$status"
+          fi
 
       - name: Test
         shell: bash
