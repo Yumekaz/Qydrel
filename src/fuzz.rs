@@ -1450,11 +1450,7 @@ fn invert_first_branch_in_body(stmts: &mut [Stmt]) -> bool {
                 *else_body = Some(original_then);
                 return true;
             }
-            Stmt::While { body, .. } => {
-                if invert_first_branch_in_body(body) {
-                    return true;
-                }
-            }
+            Stmt::While { body, .. } if invert_first_branch_in_body(body) => return true,
             _ => {}
         }
     }
@@ -1558,10 +1554,8 @@ fn reorder_first_independent_statement_in_body(stmts: &mut Vec<Stmt>) -> bool {
                     }
                 }
             }
-            Stmt::While { body, .. } => {
-                if reorder_first_independent_statement_in_body(body) {
-                    return true;
-                }
+            Stmt::While { body, .. } if reorder_first_independent_statement_in_body(body) => {
+                return true;
             }
             _ => {}
         }
